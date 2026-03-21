@@ -94,6 +94,7 @@ class LLMClient:
         learner_input: str,
         target_language: str,
         learner_level: str,
+        valid_grammar_patterns: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Analyze learner input for errors and learning opportunities.
@@ -102,10 +103,26 @@ class LLMClient:
             learner_input: What the learner said/wrote
             target_language: Language being learned (e.g., "german")
             learner_level: CEFR level (A1, A2, B1, etc.)
+            valid_grammar_patterns: Optional list of valid pattern names for grammar errors.
+                If provided, grammar errors must include a "pattern" field using one of these names.
 
         Returns:
             Dictionary with analysis results including errors and suggestions
         """
+        # Build system prompt with optional pattern guidance
+        pattern_instruction = ""
+        if valid_grammar_patterns:
+            patterns_str = ", ".join(valid_grammar_patterns)
+            pattern_instruction = f"""
+
+IMPORTANT: For each grammar error, you MUST identify the specific grammar pattern from the curriculum.
+Valid pattern names are:
+{patterns_str}
+
+Choose the MOST SPECIFIC pattern that applies to the error. If you're unsure which pattern to choose,
+pick the one that best describes the grammatical structure the learner is struggling with.
+"""
+
         system_prompt = f"""You are an expert language teacher analyzing a {target_language} learner's input.
 The learner is at {learner_level} level.
 
@@ -113,7 +130,7 @@ Analyze the input for:
 1. Grammar errors (specify severity: minor, moderate, major)
 2. Vocabulary usage (words used correctly/incorrectly)
 3. Naturalness (is it natural or awkward?)
-4. What the learner is trying to say
+4. What the learner is trying to say{pattern_instruction}
 
 Return a JSON object with this structure:
 {{
@@ -123,7 +140,7 @@ Return a JSON object with this structure:
             "severity": "minor|moderate|major",
             "description": "brief explanation",
             "correction": "corrected version",
-            "critical": false
+            "critical": false{', "pattern": "sv_order_main_clause"  // REQUIRED for grammar errors - use only valid pattern names from list above' if valid_grammar_patterns else ''}
         }}
     ],
     "vocabulary_used": ["word1", "word2"],
