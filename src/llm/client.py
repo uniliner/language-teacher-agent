@@ -128,7 +128,7 @@ The learner is at {learner_level} level.
 
 Analyze the input for:
 1. Grammar errors (specify severity: minor, moderate, major)
-2. Vocabulary usage (words used correctly/incorrectly)
+2. Vocabulary usage (important words the learner used or tried to use)
 3. Naturalness (is it natural or awkward?)
 4. What the learner is trying to say{pattern_instruction}
 
@@ -143,7 +143,9 @@ Return a JSON object with this structure:
             "critical": false{', "pattern": "sv_order_main_clause"  // REQUIRED for grammar errors - use only valid pattern names from list above' if valid_grammar_patterns else ''}
         }}
     ],
-    "vocabulary_used": ["word1", "word2"],
+    "vocabulary_used": [
+        {{"word": "german_word", "translation": "english_translation", "part_of_speech": "noun|verb|adjective|adverb|preposition|pronoun|other"}}
+    ],
     "intended_meaning": "what they're trying to say",
     "naturalness": "natural|awkward",
     "confidence_level": "high|medium|low"

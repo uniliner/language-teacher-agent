@@ -8,6 +8,7 @@ tracking learner progress and making pedagogical decisions.
 from typing import Any, Dict, List, Optional
 
 from .base import Agent, AgentConfig
+from .grammar_curriculum import GrammarCurriculumAgent
 from models.learner import Learner, ConfidenceLevel
 from pedagogy.engine import PedagogicalEngine, TeachingDecision
 from llm.client import LLMClient, Message
@@ -31,11 +32,24 @@ class ConversationAgent(Agent):
         learner: Learner,
         llm_client: LLMClient,
         pedagogical_engine: Optional[PedagogicalEngine] = None,
+        grammar_curriculum_agent: Optional[GrammarCurriculumAgent] = None,
     ):
         super().__init__(config, learner, llm_client)
 
         # Pedagogical engine for decision making
         self.pedagogical_engine = pedagogical_engine or PedagogicalEngine(learner)
+
+        # Grammar curriculum agent (create if not provided)
+        grammar_config = AgentConfig(
+            name="grammar_curriculum",
+            description="Manages grammar curriculum and tracks pattern progress",
+            target_language=config.target_language,
+        )
+        self.grammar_curriculum_agent = grammar_curriculum_agent or GrammarCurriculumAgent(
+            config=grammar_config,
+            learner=learner,
+            llm_client=llm_client,
+        )
 
         # Conversation state
         self.conversation_active = False
@@ -112,10 +126,14 @@ class ConversationAgent(Agent):
             return {"errors": [], "vocabulary_used": []}
 
         try:
+            # Get valid pattern names from the curriculum agent
+            valid_patterns = GrammarCurriculumAgent.get_valid_pattern_names()
+
             analysis = self.llm_client.analyze_learner_input(
                 learner_input=learner_input,
                 target_language=self.config.target_language,
                 learner_level=self.learner.current_cefr_level,
+                valid_grammar_patterns=valid_patterns,
             )
             return analysis
         except Exception as e:
@@ -166,21 +184,47 @@ class ConversationAgent(Agent):
         updates = {}
 
         # Track vocabulary used
-        for word in analysis.get("vocabulary_used", []):
+        vocabulary_data = analysis.get("vocabulary_used", [])
+        for vocab_item_data in vocabulary_data:
+            # Handle both old format (string) and new format (dict)
+            if isinstance(vocab_item_data, str):
+                # Old format - just the word
+                word = vocab_item_data
+                translation = ""
+                part_of_speech = "unknown"
+            else:
+                # New format - dict with word, translation, part_of_speech
+                word = vocab_item_data.get("word", "")
+                translation = vocab_item_data.get("translation", "")
+                part_of_speech = vocab_item_data.get("part_of_speech", "unknown")
+
+            if not word:
+                continue
+
             vocab_item = self.learner.get_vocabulary(word)
             if vocab_item:
                 vocab_item.record_encounter(context=learner_input[:50])
-            else:
-                # We'd ideally get translations from the analysis
-                # For now, skip if we don't have translation info
-                pass
+            elif translation:  # Only create new words if we have translation
+                self.learner.add_or_update_vocabulary(
+                    word=word,
+                    translation=translation,
+                    part_of_speech=part_of_speech,
+                    context=learner_input[:50],
+                )
 
-        # Record grammar attempts
-        for error in analysis.get("errors", []):
-            if error.get("type") == "grammar":
-                error_pattern = error.get("pattern", "general")
-                success = error.get("severity") != "major"
-                self.learner.record_grammar_attempt(error_pattern, success)
+        # Use GrammarCurriculumAgent for grammar tracking
+        grammar_result = self.grammar_curriculum_agent.process(
+            input_data={
+                "errors": analysis.get("errors", []),
+                "learner_input": learner_input,
+            }
+        )
+
+        # Track grammar updates in response
+        if grammar_result.get("patterns_updated"):
+            updates["grammar_patterns_updated"] = grammar_result["patterns_updated"]
+            updates["ready_to_advance"] = grammar_result.get("ready_to_advance", False)
+            updates["suggested_focus"] = grammar_result.get("suggested_focus")
 
         # Update confidence based on session
         error_count = len(analysis.get("errors", []))
