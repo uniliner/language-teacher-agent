@@ -30,7 +30,7 @@ from memory.json_store import JSONMemoryStore
 class LanguageLearningCLI:
     """Command-line interface for language learning."""
 
-    def __init__(self, data_dir: str = "./data"):
+    def __init__(self, data_dir: str = "./data", experimentation_mode: bool = False):
         """Initialize the CLI."""
         load_dotenv()
 
@@ -51,6 +51,7 @@ class LanguageLearningCLI:
 
         # Session state
         self.session_active = False
+        self.experimentation_mode = experimentation_mode
 
     def run(self):
         """Run the CLI application."""
@@ -201,7 +202,16 @@ Let's get started!
             config=config,
             learner=self.learner,
             llm_client=self.llm_client,
+            experimentation_mode=self.experimentation_mode,
         )
+
+        # Show experimentation mode notice
+        if self.experimentation_mode:
+            self.console.print("\n[yellow bold]🧪 Experimentation Mode Active[/yellow bold]")
+            self.console.print("[dim]Pedagogical triggers are accelerated for testing:[/dim]")
+            self.console.print("[dim]  • New material: every 2 turns (vs 10)[/dim]")
+            self.console.print("[dim]  • Reviews: every 3 turns (vs 8)[/dim]")
+            self.console.print("[dim]  • Minimum intro time: 30s (vs 3 min)[/dim]\n")
 
         # Ask for topic
         self.console.print("\n[bold cyan]Starting conversation...[/bold cyan]")
@@ -248,6 +258,18 @@ Let's get started!
                     border_style="green"
                 ))
 
+                # Show pedagogical action in experimentation mode
+                if self.experimentation_mode and result.get("teaching_action"):
+                    action_colors = {
+                        "correct": "red",
+                        "introduce": "blue",
+                        "review": "yellow",
+                        "continue": "green",
+                        "simplify": "magenta"
+                    }
+                    action_color = action_colors.get(result["teaching_action"], "white")
+                    self.console.print(f"\n[dim][{action_color}]Action: {result['teaching_action'].upper()}[/{action_color}][/dim]")
+
                 # Show errors if any and in learning mode
                 if result["errors"] and self.learner.correction_sensitivity != "gentle":
                     self.console.print(f"\n[dim]Errors detected: {len(result['errors'])}[/dim]")
@@ -271,6 +293,8 @@ Let's get started!
         self.console.print("\n" + "="*50)
         self.console.print("[bold yellow]Session Summary[/bold yellow]")
         self.console.print("="*50)
+        if summary['session'].get('experimentation_mode'):
+            self.console.print("[yellow]🧪 Experimentation Mode[/yellow]")
         self.console.print(f"Turns: {summary['session']['turns']}")
         self.console.print(f"Errors: {summary['session']['errors']}")
         self.console.print(f"Error rate: {summary['session']['error_rate']:.1%}")
@@ -366,13 +390,18 @@ def main():
         default="./data",
         help="Directory to store learner data"
     )
+    parser.add_argument(
+        "--experiment", "--fast",
+        action="store_true",
+        help="Enable experimentation mode with accelerated pedagogical triggers for testing"
+    )
     args = parser.parse_args()
 
     # Ensure data directory exists
     Path(args.data_dir).mkdir(parents=True, exist_ok=True)
 
     # Run CLI
-    cli = LanguageLearningCLI(data_dir=args.data_dir)
+    cli = LanguageLearningCLI(data_dir=args.data_dir, experimentation_mode=args.experiment)
     cli.run()
 
 

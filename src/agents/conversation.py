@@ -33,11 +33,15 @@ class ConversationAgent(Agent):
         llm_client: LLMClient,
         pedagogical_engine: Optional[PedagogicalEngine] = None,
         grammar_curriculum_agent: Optional[GrammarCurriculumAgent] = None,
+        experimentation_mode: bool = False,
     ):
         super().__init__(config, learner, llm_client)
 
         # Pedagogical engine for decision making
-        self.pedagogical_engine = pedagogical_engine or PedagogicalEngine(learner)
+        self.pedagogical_engine = pedagogical_engine or PedagogicalEngine(
+            learner, experimentation_mode=experimentation_mode
+        )
+        self.experimentation_mode = experimentation_mode
 
         # Grammar curriculum agent (create if not provided)
         grammar_config = AgentConfig(
@@ -282,7 +286,9 @@ class ConversationAgent(Agent):
         self.conversation_active = True
         self.current_topic = topic
         self.turns_in_session = 0
-        self.pedagogical_engine = PedagogicalEngine(self.learner)  # Reset engine
+        self.pedagogical_engine = PedagogicalEngine(
+            self.learner, experimentation_mode=self.experimentation_mode
+        )  # Reset engine
 
         # Generate opening
         if topic:
