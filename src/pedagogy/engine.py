@@ -230,17 +230,45 @@ class PedagogicalEngine:
         """Create a decision to introduce new material."""
         self.last_introduction_time = datetime.now()
 
-        # Determine what to introduce
-        # (This would integrate with curriculum in full version)
-        metadata = {
-            "introduction_type": "vocabulary",  # or "grammar"
-            "current_level": self.learner.current_cefr_level,
-            "conversation_topic": conversation_state.get("topic", "general"),
-        }
+        # Determine what to introduce based on learner's weak areas
+        weak_grammar = self.learner.get_weak_grammar_areas(threshold=0.5)
+
+        # Prioritize grammar if there are weak areas, otherwise vocabulary
+        if weak_grammar and len(weak_grammar) > 0:
+            # Introduce the next grammar pattern from curriculum
+            introduction_type = "grammar"
+            pattern = weak_grammar[0]  # Focus on weakest area
+
+            # Select strategy based on difficulty and learner confidence
+            difficulty = getattr(pattern, "difficulty_level", 2)
+            if difficulty >= 4 or self.learner.confidence in [ConfidenceLevel.LOW, ConfidenceLevel.VERY_LOW]:
+                strategy = TeachingStrategy.Explicit_explanation
+            elif difficulty >= 3 or self.learner.confidence == ConfidenceLevel.MODERATE:
+                strategy = TeachingStrategy.Pattern_highlighting
+            else:
+                strategy = TeachingStrategy.Contextual_introduction
+
+            metadata = {
+                "introduction_type": "grammar",
+                "current_level": self.learner.current_cefr_level,
+                "conversation_topic": conversation_state.get("topic", "general"),
+                "grammar_pattern": pattern.name if hasattr(pattern, "name") else str(pattern),
+                "pattern_description": pattern.description if hasattr(pattern, "description") else "",
+            }
+        else:
+            # Default to vocabulary introduction
+            introduction_type = "vocabulary"
+            strategy = TeachingStrategy.Contextual_introduction
+
+            metadata = {
+                "introduction_type": "vocabulary",
+                "current_level": self.learner.current_cefr_level,
+                "conversation_topic": conversation_state.get("topic", "general"),
+            }
 
         return TeachingDecision(
             action="introduce",
-            strategy=TeachingStrategy.Contextual_introduction,
+            strategy=strategy,
             content=None,  # LLM will generate this
             metadata=metadata,
         )
@@ -251,15 +279,50 @@ class PedagogicalEngine:
         vocab_to_review = self.learner.get_vocabulary_to_review()
         weak_grammar = self.learner.get_weak_grammar_areas(threshold=0.6)
 
-        metadata = {
-            "review_type": "vocabulary" if vocab_to_review else "grammar",
-            "items": [v.word for v in vocab_to_review[:3]] if vocab_to_review else [],
-            "patterns": [p.name for p in weak_grammar[:2]] if weak_grammar else [],
-        }
+        # Decide what to review and select appropriate strategy
+        if weak_grammar and len(weak_grammar) > 0:
+            # Review grammar - use explicit strategies for weak areas
+            review_type = "grammar"
+            pattern = weak_grammar[0]
+            difficulty = getattr(pattern, "difficulty_level", 2)
+            mastery = pattern.mastery_score if hasattr(pattern, "mastery_score") else 0.5
+
+            # If mastery is very low, use explicit explanation
+            if mastery < 0.4 or difficulty >= 4:
+                strategy = TeachingStrategy.Explicit_explanation
+            elif mastery < 0.6:
+                strategy = TeachingStrategy.Pattern_highlighting
+            else:
+                strategy = TeachingStrategy.SPACED_REPETITION
+
+            metadata = {
+                "review_type": "grammar",
+                "patterns": [p.name for p in weak_grammar[:2]],
+                "pattern_descriptions": [p.description for p in weak_grammar[:2] if hasattr(p, "description")],
+                "mastery_scores": [round(p.mastery_score, 2) for p in weak_grammar[:2] if hasattr(p, "mastery_score")],
+            }
+        elif vocab_to_review:
+            # Review vocabulary - use spaced repetition
+            review_type = "vocabulary"
+            strategy = TeachingStrategy.SPACED_REPETITION
+
+            metadata = {
+                "review_type": "vocabulary",
+                "items": [v.word for v in vocab_to_review[:3]],
+            }
+        else:
+            # Default to vocabulary review
+            review_type = "vocabulary"
+            strategy = TeachingStrategy.SPACED_REPETITION
+
+            metadata = {
+                "review_type": "vocabulary",
+                "items": [],
+            }
 
         return TeachingDecision(
             action="review",
-            strategy=TeachingStrategy.SPACED_REPETITION,
+            strategy=strategy,
             content=None,
             metadata=metadata,
         )

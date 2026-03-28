@@ -133,11 +133,19 @@ class ConversationAgent(Agent):
             # Get valid pattern names from the curriculum agent
             valid_patterns = GrammarCurriculumAgent.get_valid_pattern_names()
 
+            # Get recent learner inputs for recurring error detection
+            recent_inputs = [
+                turn.get("learner_input", "")
+                for turn in self.learner.recent_conversations[-5:]
+                if turn.get("learner_input")
+            ]
+
             analysis = self.llm_client.analyze_learner_input(
                 learner_input=learner_input,
                 target_language=self.config.target_language,
                 learner_level=self.learner.current_cefr_level,
                 valid_grammar_patterns=valid_patterns,
+                recent_learner_inputs=recent_inputs,
             )
             return analysis
         except Exception as e:
@@ -299,21 +307,56 @@ class ConversationAgent(Agent):
         # Translate to German with context
         if self.llm_client:
             try:
-                opening_prompt = f"""Generate a friendly, natural opening for a {self.config.target_language} conversation practice session.
+                opening_prompt = f"""Generate exactly ONE short opening message for a {self.config.target_language} conversation practice session.
 Learner level: {self.learner.current_cefr_level}
 Topic: {topic or 'general conversation'}
-Keep it simple and welcoming."""
+
+IMPORTANT CONSTRAINTS:
+- Return ONLY a single opening message in {self.config.target_language}
+- Do NOT provide multiple options
+- Do NOT use numbering or bullet points
+- Do NOT use markdown headers (like ## or ###)
+- Do NOT include any meta-commentary or explanations
+- Just output the greeting itself, nothing else
+
+Keep it simple, friendly, and welcoming."""
 
                 opening = self.llm_client.generate_response(
-                    system_prompt="You are a friendly language teacher.",
+                    system_prompt=f"You are a friendly {self.config.target_language} language teacher. You always respond with exactly one message, never multiple options.",
                     user_message=opening_prompt,
                     temperature=0.8,
                     max_tokens=100,
                 )
+
+                # Cleanup: if LLM still returned multiple options, extract the first one
+                opening = self._extract_single_opening(opening)
             except Exception:
                 pass  # Use fallback
 
         return opening
+
+    def _extract_single_opening(self, text: str) -> str:
+        """Extract a single opening message from text that might contain multiple options."""
+        lines = text.strip().split('\n')
+        first_line = lines[0].strip()
+
+        # Remove common prefixes
+        for prefix in ["1.", "2.", "3.", "-", "•", "*", "Option", "Here", "Here's"]:
+            if first_line.startswith(prefix):
+                first_line = first_line[len(prefix):].strip()
+
+        # Remove markdown headers
+        first_line = first_line.lstrip('#').strip()
+
+        # Remove meta-commentary prefixes
+        if first_line.lower().startswith(("here is", "here's", "you could say", "you might say")):
+            # Try to find the actual quote
+            if '"' in first_line:
+                parts = first_line.split('"')
+                if len(parts) >= 2:
+                    first_line = parts[1]
+
+        return first_line if first_line else text.strip()
 
     def end_conversation(self) -> Dict[str, Any]:
         """

@@ -118,6 +118,51 @@ Your approach:
         return prompt
 
 
+class ExplicitGrammarLessonPrompt(PromptTemplate):
+    """Prompt for explicit grammar instruction with structured explanations."""
+
+    def build(
+        self,
+        target_language: str,
+        learner_level: str,
+        grammar_pattern: str,
+        pattern_description: str,
+        examples: list[str],
+        context: str,
+    ) -> str:
+        """Build a prompt for explicit grammar instruction."""
+        examples_text = "\n".join(f"- {ex}" for ex in examples)
+
+        prompt = f"""You are teaching a {target_language} learner at {learner_level} level.
+
+GRAMMAR FOCUS: {grammar_pattern}
+PATTERN: {pattern_description}
+
+EXAMPLES TO SHOW:
+{examples_text}
+
+CONVERSATION CONTEXT: {context}
+
+IMPORTANT: This is an EXPLICIT GRAMMAR LESSON moment. Pause the natural conversation flow to provide focused instruction.
+
+Your response should:
+1. **Acknowledge the conversation briefly**, then transition to explicit teaching
+2. **Explain the grammar pattern clearly** - what it is, when to use it, why it matters
+3. **Show the examples** with clear breakdowns of how they work
+4. **Connect it to the conversation context** so it feels relevant
+5. **Give the learner a chance to try it** - prompt them to use the pattern
+6. **Be encouraging but direct** - this is instruction time, not just casual chat
+
+Use English for the grammar explanation and pattern breakdown, then switch to {target_language} for examples and practice.
+
+Example structure:
+"Great question! Let me explain [pattern] clearly. In {target_language}, [explanation]. Here's how it works: [breakdown]. Your turn - can you [practice prompt]?"
+
+Keep it structured and educational while remaining warm and supportive."""
+
+        return prompt
+
+
 class PromptBuilder:
     """
     Builds complete prompts combining system prompts and context.
@@ -131,6 +176,7 @@ class PromptBuilder:
         self.conversation_template = ConversationPrompt()
         self.error_template = ErrorAnalysisPrompt()
         self.introduction_template = IntroductionPrompt()
+        self.explicit_grammar_template = ExplicitGrammarLessonPrompt()
 
     def build_conversation_prompt(
         self,

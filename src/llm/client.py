@@ -95,6 +95,7 @@ class LLMClient:
         target_language: str,
         learner_level: str,
         valid_grammar_patterns: Optional[List[str]] = None,
+        recent_learner_inputs: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Analyze learner input for errors and learning opportunities.
@@ -105,6 +106,7 @@ class LLMClient:
             learner_level: CEFR level (A1, A2, B1, etc.)
             valid_grammar_patterns: Optional list of valid pattern names for grammar errors.
                 If provided, grammar errors must include a "pattern" field using one of these names.
+            recent_learner_inputs: Optional list of recent learner inputs for detecting recurring errors.
 
         Returns:
             Dictionary with analysis results including errors and suggestions
@@ -123,14 +125,39 @@ Choose the MOST SPECIFIC pattern that applies to the error. If you're unsure whi
 pick the one that best describes the grammatical structure the learner is struggling with.
 """
 
+        # Build recent inputs context for recurring error detection
+        recent_context = ""
+        if recent_learner_inputs:
+            recent_inputs_text = "\n".join(f"- {inp}" for inp in recent_learner_inputs[-5:])
+            recent_context = f"""
+
+RECENT LEARNER INPUTS (for detecting recurring errors):
+{recent_inputs_text}
+
+Set "recurring": true ONLY if an error of the same TYPE (e.g., verb position, word order) and PATTERN has appeared
+in the recent inputs above. Match based on the grammatical pattern, not the specific words used.
+"""
+
         system_prompt = f"""You are an expert language teacher analyzing a {target_language} learner's input.
 The learner is at {learner_level} level.
 
+CRITICAL ERROR DETECTION RULES:
+1. ONLY flag errors that are OBJECTIVELY GRAMMATICALLY WRONG
+2. Do NOT flag stylistic preferences, word choice suggestions, or minor variations that are still grammatically correct
+3. Examples of what NOT to flag:
+   - Correct word order even if there's a more common alternative (e.g., "obwohl ich Müsli auch mag" is CORRECT)
+   - Vocabulary choices that are grammatically correct but less common (e.g., "zu schwarz" is not an error)
+   - Regional variations that are still grammatically valid
+4. Each error entry MUST focus on a SINGLE, SPECIFIC error type:
+   - Do NOT mix grammar and vocabulary issues in the same error object
+   - If there are multiple issues, create separate error entries for each
+   - Keep "type" field consistent with the PRIMARY error in that entry
+
 Analyze the input for:
-1. Grammar errors (specify severity: minor, moderate, major)
+1. OBJECTIVE grammar errors only (specify severity: minor, moderate, major)
 2. Vocabulary usage (important words the learner used or tried to use)
 3. Naturalness (is it natural or awkward?)
-4. What the learner is trying to say{pattern_instruction}
+4. What the learner is trying to say{pattern_instruction}{recent_context}
 
 Return a JSON object with this structure:
 {{
@@ -140,7 +167,8 @@ Return a JSON object with this structure:
             "severity": "minor|moderate|major",
             "description": "brief explanation",
             "correction": "corrected version",
-            "critical": false{', "pattern": "sv_order_main_clause"  // REQUIRED for grammar errors - use only valid pattern names from list above' if valid_grammar_patterns else ''}
+            "critical": false{', "pattern": "sv_order_main_clause"  // REQUIRED for grammar errors - use only valid pattern names from list above' if valid_grammar_patterns else ''},
+            "recurring": false  // true if this same error type and pattern appeared in recent inputs
         }}
     ],
     "vocabulary_used": [
@@ -200,7 +228,28 @@ Return a JSON object with this structure:
         Returns:
             Generated response in target language
         """
-        # Build system prompt based on decision
+        from pedagogy.strategies import TeachingStrategy
+
+        # Check if this is an explicit grammar lesson moment
+        is_explicit_grammar = (
+            decision.action in ["introduce", "review"]
+            and decision.metadata.get("introduction_type") == "grammar"
+            or decision.metadata.get("review_type") == "grammar"
+        ) and decision.strategy in [
+            TeachingStrategy.Explicit_explanation,
+            TeachingStrategy.Pattern_highlighting,
+        ]
+
+        if is_explicit_grammar:
+            # Use explicit grammar lesson prompt
+            return self._generate_explicit_grammar_response(
+                learner_input=learner_input,
+                decision=decision,
+                conversation_context=conversation_context,
+                target_language=target_language,
+            )
+
+        # Default: Build system prompt based on decision
         strategy_guidance = self._get_strategy_guidance(decision.strategy)
 
         system_prompt = f"""You are an adaptive {target_language} language learning companion.
@@ -240,6 +289,81 @@ Guidelines:
 
         return response.content[0].text
 
+    def _generate_explicit_grammar_response(
+        self,
+        learner_input: str,
+        decision: object,
+        conversation_context: Dict[str, Any],
+        target_language: str,
+    ) -> str:
+        """Generate an explicit grammar lesson response."""
+        from pedagogy.strategies import TeachingStrategy
+
+        # Extract grammar pattern information
+        metadata = decision.metadata
+        grammar_pattern = metadata.get("grammar_pattern", "")
+        pattern_description = metadata.get("pattern_description", "")
+
+        # For review, get pattern info from metadata
+        if not grammar_pattern and metadata.get("patterns"):
+            grammar_pattern = metadata["patterns"][0]
+            pattern_descriptions = metadata.get("pattern_descriptions", [])
+            if pattern_descriptions:
+                pattern_description = pattern_descriptions[0]
+
+        # Build explicit grammar prompt
+        strategy_guidance = self._get_strategy_guidance(decision.strategy)
+
+        system_prompt = f"""You are an adaptive {target_language} language learning companion.
+
+Current teaching approach: {strategy_guidance}
+
+Learner context:
+- Confidence level: {conversation_context.get('confidence', 'moderate')}
+- Recent error rate: {conversation_context.get('error_rate', 0.0):.1%}
+- CEFR level: {conversation_context.get('cefr_level', 'A1')}
+
+IMPORTANT: This is an EXPLICIT GRAMMAR LESSON moment. Pause the natural conversation flow to provide focused instruction.
+
+Your response should:
+1. **Acknowledge the conversation briefly**, then transition to explicit teaching
+2. **Explain the grammar pattern clearly** - what it is, when to use it, why it matters
+3. **Show clear examples** with breakdowns of how they work
+4. **Connect it to the conversation context** so it feels relevant
+5. **Give the learner a chance to try it** - prompt them to use the pattern
+6. **Be encouraging but direct** - this is instruction time, not just casual chat
+
+Use English for the grammar explanation and pattern breakdown, then switch to {target_language} for examples and practice."""
+
+        # Build user message with grammar context
+        user_message = f"Learner said: {learner_input}\n\n"
+
+        if grammar_pattern:
+            user_message += f"GRAMMAR PATTERN: {grammar_pattern}\n"
+        if pattern_description:
+            user_message += f"PATTERN DESCRIPTION: {pattern_description}\n"
+
+        if decision.action == "introduce":
+            user_message += f"\nACTION: Introduce this grammar pattern explicitly\n"
+        elif decision.action == "review":
+            mastery_scores = metadata.get("mastery_scores", [])
+            if mastery_scores:
+                user_message += f"\nACTION: Review this grammar pattern (current mastery: {mastery_scores[0]:.0%})\n"
+            else:
+                user_message += f"\nACTION: Review this grammar pattern\n"
+
+        user_message += "\nGenerate your explicit grammar lesson response:"
+
+        response = self.client.messages.create(
+            model=self.model,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_message}],
+            temperature=0.7,  # Slightly lower for structured instruction
+            max_tokens=800,  # Allow more tokens for explanations
+        )
+
+        return response.content[0].text
+
     def _get_strategy_guidance(self, strategy) -> str:
         """Get guidance text for a teaching strategy."""
         from pedagogy.strategies import TeachingStrategy
@@ -254,6 +378,9 @@ Guidelines:
             TeachingStrategy.CHALLENGE_PROVIDING: "Gently push them beyond their comfort. Introduce slightly more complex structures or vocabulary.",
             TeachingStrategy.Scaffolding: "Build on what they already know. Connect new material to familiar structures.",
             TeachingStrategy.SPACED_REPETITION: "Gently incorporate previously learned material that needs review into the conversation.",
+            TeachingStrategy.Explicit_explanation: "PAUSE THE CONVERSATION FLOW. Deliver a focused, structured grammar lesson with explicit explanations, clear examples, and breakdowns. This is teaching time, not casual chat.",
+            TeachingStrategy.Pattern_highlighting: "Draw explicit attention to a specific grammar pattern. Show how it works, give clear examples, and explain when to use it. Be direct and instructional.",
+            TeachingStrategy.Contextual_introduction: "Introduce new material naturally within the conversation flow. Weave it into context without breaking the conversational rhythm.",
         }
 
         return guidance_map.get(strategy, "Converse naturally while being helpful and encouraging.")
