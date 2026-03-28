@@ -50,9 +50,10 @@ class PedagogicalEngine:
     teaching decisions in real-time.
     """
 
-    def __init__(self, learner: Learner):
+    def __init__(self, learner: Learner, experimentation_mode: bool = False):
         self.learner = learner
         self.selector = StrategySelector()
+        self.experimentation_mode = experimentation_mode
 
         # Conversation state
         self.current_mode: InteractionMode = InteractionMode.CONVERSATION
@@ -65,6 +66,16 @@ class PedagogicalEngine:
         # Configuration
         self.max_errors_before_simplify = 5
         self.flow_threshold = 0.6  # Below this, prioritize flow
+
+        # Experimentation mode: faster triggers for testing
+        if self.experimentation_mode:
+            self._introduction_interval = 2  # Every 2 turns instead of 5-10
+            self._review_interval = 3  # Every 3 turns instead of 8
+            self._min_intro_time = 0.5  # 30 seconds instead of 3 minutes
+        else:
+            self._introduction_interval = 10  # Normal: every 10 turns
+            self._review_interval = 8  # Normal: every 8 turns
+            self._min_intro_time = 3  # Normal: 3 minutes
 
     def analyze_turn(
         self,
@@ -153,6 +164,12 @@ class PedagogicalEngine:
         """Decide if it's a good time to introduce new material."""
         time_since_intro = (datetime.now() - self.last_introduction_time).total_seconds() / 60
 
+        if self.experimentation_mode:
+            # Fast-track for experimentation: check every few turns
+            if time_since_intro < self._min_intro_time:
+                return False
+            return self.turn_count % self._introduction_interval == 0 and self.turn_count > 1
+
         return self.selector.should_introduce_new(
             recent_turns=self.turn_count,
             recent_errors=self.error_count,
@@ -168,8 +185,13 @@ class PedagogicalEngine:
         # Check weak grammar areas
         weak_grammar = len(self.learner.get_weak_grammar_areas(threshold=0.6)) > 0
 
-        # Every ~8 turns, consider review
-        review_due = self.turn_count % 8 == 0 and self.turn_count > 5
+        # Check review timing based on mode
+        if self.experimentation_mode:
+            # More frequent review in experimentation mode
+            review_due = self.turn_count % self._review_interval == 0 and self.turn_count > 1
+        else:
+            # Normal: every ~8 turns
+            review_due = self.turn_count % 8 == 0 and self.turn_count > 5
 
         return (vocab_needs_review or weak_grammar) and review_due
 
@@ -301,4 +323,5 @@ class PedagogicalEngine:
             "duration_minutes": round(duration, 1),
             "flow_score": round(self.conversation_flow_score, 2),
             "mode": self.current_mode,
+            "experimentation_mode": self.experimentation_mode,
         }
