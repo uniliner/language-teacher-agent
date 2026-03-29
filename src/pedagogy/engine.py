@@ -61,6 +61,8 @@ class PedagogicalEngine:
         self.error_count = 0
         self.session_start = datetime.now()
         self.last_introduction_time = datetime.now()
+        self.last_pronunciation_time = datetime.now()
+        self.last_pronunciation_turn = 0  # Track turn number when we last taught pronunciation
         self.conversation_flow_score = 0.5  # 0.0 = struggling, 1.0 = flowing
 
         # Configuration
@@ -71,10 +73,12 @@ class PedagogicalEngine:
         if self.experimentation_mode:
             self._introduction_interval = 2  # Every 2 turns instead of 5-10
             self._review_interval = 3  # Every 3 turns instead of 8
+            self._pronunciation_interval = 3  # Every 3 turns for testing
             self._min_intro_time = 0.5  # 30 seconds instead of 3 minutes
         else:
             self._introduction_interval = 10  # Normal: every 10 turns
             self._review_interval = 8  # Normal: every 8 turns
+            self._pronunciation_interval = 15  # Normal: every 15 turns
             self._min_intro_time = 3  # Normal: 3 minutes
 
     def analyze_turn(
@@ -105,6 +109,10 @@ class PedagogicalEngine:
         # Major decision tree
         if detected_errors and self._should_correct_now(detected_errors):
             return self._create_correction_decision(detected_errors, learner_input)
+
+        # Check if we should teach pronunciation
+        if self._should_teach_pronunciation(conversation_state):
+            return self._create_pronunciation_decision(conversation_state)
 
         if self._should_introduce_new_material(recent_error_rate):
             return self._create_introduction_decision(conversation_state)
@@ -374,6 +382,116 @@ class PedagogicalEngine:
             base *= 1.3
 
         return base
+
+    def _should_teach_pronunciation(
+        self,
+        conversation_state: Dict[str, Any],
+    ) -> bool:
+        """
+        Decide if it's a good time to teach pronunciation.
+
+        Strategic decision: Is NOW a good time to teach pronunciation?
+
+        Consider:
+        - Conversation flow (don't interrupt if flow < 0.4)
+        - Learner confidence (don't overwhelm if VERY_LOW)
+        - Teaching frequency (not too often - every ~15 turns)
+        - Pattern availability (are there patterns to teach?)
+
+        Args:
+            conversation_state: Current conversation context
+
+        Returns:
+            True if should teach pronunciation
+        """
+        # Don't interrupt struggling conversations
+        if self.conversation_flow_score < 0.4:
+            return False
+
+        # Don't overwhelm low-confidence learners
+        if self.learner.confidence in [ConfidenceLevel.VERY_LOW, ConfidenceLevel.LOW]:
+            return False
+
+        # Don't teach too frequently
+        turns_since = self._turns_since_last_pronunciation()
+        if turns_since < self._pronunciation_interval:
+            return False
+
+        # Do we have patterns due for review?
+        if self._has_patterns_due_for_review():
+            return True
+
+        # Do we have new patterns to introduce?
+        if self._has_new_pronunciation_patterns():
+            # In experimentation mode, introduce new patterns more quickly
+            if self.experimentation_mode:
+                return self.turn_count >= 2 and self.turn_count % self._pronunciation_interval == 0
+            else:
+                # Normal: wait a bit longer and check interval
+                return self.turn_count > 5 and self.turn_count % self._pronunciation_interval == 0
+
+        return False
+
+    def _turns_since_last_pronunciation(self) -> int:
+        """Get number of turns since last pronunciation teaching."""
+        # In experimentation mode, use turn count tracking
+        if self.experimentation_mode:
+            return self.turn_count - self.last_pronunciation_turn
+
+        # Normal mode: time-based check
+        time_since = (datetime.now() - self.last_pronunciation_time).total_seconds() / 60
+        return int(time_since)  # Returns minutes since last pronunciation teaching
+
+    def _has_patterns_due_for_review(self) -> bool:
+        """Check if learner has pronunciation patterns due for review."""
+        if not hasattr(self.learner, "pronunciation_patterns"):
+            return False
+
+        now = datetime.now()
+        for pattern in self.learner.pronunciation_patterns.values():
+            if pattern.is_due_for_review and pattern.mastery_score < 0.8:
+                return True
+
+        return False
+
+    def _has_new_pronunciation_patterns(self) -> bool:
+        """Check if there are new pronunciation patterns to introduce."""
+        if not hasattr(self.learner, "pronunciation_patterns"):
+            return True  # Learner hasn't started pronunciation yet
+
+        # Check if there are patterns in database that learner hasn't seen
+        # We assume if learner has < 10 patterns, there are more to learn
+        return len(self.learner.pronunciation_patterns) < 10
+
+    def _create_pronunciation_decision(
+        self,
+        conversation_state: Dict[str, Any],
+    ) -> TeachingDecision:
+        """
+        Create a decision to teach pronunciation.
+
+        Args:
+            conversation_state: Current conversation context
+
+        Returns:
+            TeachingDecision for pronunciation teaching
+        """
+        self.last_pronunciation_time = datetime.now()
+        self.last_pronunciation_turn = self.turn_count  # Track the turn we taught pronunciation
+
+        metadata = {
+            "teaching_type": "pronunciation",
+            "current_level": self.learner.current_cefr_level,
+            "conversation_topic": conversation_state.get("topic", "general"),
+            "confidence_level": self.learner.confidence,
+        }
+
+        return TeachingDecision(
+            action="teach_pronunciation",
+            strategy=TeachingStrategy.PRONUNCIATION_TEACHING,
+            content=None,  # Agent will generate this
+            metadata=metadata,
+        )
 
     def get_session_summary(self) -> Dict[str, Any]:
         """Get summary of current teaching session."""

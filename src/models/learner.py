@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from .vocabulary import VocabularyItem, VocabularyStatus
 from .grammar import GrammarPattern
+from .pronunciation import PronunciationPattern
 
 
 class ConfidenceLevel(str, Enum):
@@ -64,6 +65,7 @@ class Learner(BaseModel):
     # Learning collections
     vocabulary: Dict[str, VocabularyItem] = Field(default_factory=dict)  # word -> item
     grammar_patterns: Dict[str, GrammarPattern] = Field(default_factory=dict)  # name -> pattern
+    pronunciation_patterns: Dict[str, PronunciationPattern] = Field(default_factory=dict)  # pattern_id -> pattern
 
     # Conversation history (recent)
     recent_conversations: List[Dict[str, Any]] = Field(default_factory=list, max_length=50)
@@ -142,6 +144,47 @@ class Learner(BaseModel):
             if p.mastery_score < threshold and p.attempts >= 3
         ]
 
+    # Pronunciation methods
+    def get_pronunciation_pattern(self, pattern_id: str) -> Optional[PronunciationPattern]:
+        """Get pronunciation pattern by ID."""
+        return self.pronunciation_patterns.get(pattern_id)
+
+    def get_pronunciation_patterns_to_review(self) -> List[PronunciationPattern]:
+        """Get pronunciation patterns that need review (spaced repetition)."""
+        return [
+            pattern
+            for pattern in self.pronunciation_patterns.values()
+            if pattern.is_due_for_review and pattern.mastery_score < 0.8
+        ]
+
+    def record_pronunciation_practice(self, pattern_id: str, quality: int) -> Optional[PronunciationPattern]:
+        """
+        Record a pronunciation practice attempt.
+
+        Args:
+            pattern_id: ID of the pattern practiced
+            quality: 0-5 rating of performance (0=complete failure, 5=perfect)
+
+        Returns:
+            The updated pattern or None if not found
+        """
+        if pattern_id not in self.pronunciation_patterns:
+            return None
+
+        pattern = self.pronunciation_patterns[pattern_id]
+        pattern.record_practice(quality)
+        self.last_updated = datetime.now()
+        return pattern
+
+    def calculate_pronunciation_mastery(self) -> float:
+        """Calculate overall pronunciation mastery score (0.0 to 1.0)."""
+        if not self.pronunciation_patterns:
+            return 0.0
+
+        return sum(p.mastery_score for p in self.pronunciation_patterns.values()) / len(
+            self.pronunciation_patterns
+        )
+
     def get_vocabulary_to_review(self) -> List[VocabularyItem]:
         """Get vocabulary items that need review (spaced repetition)."""
         now = datetime.now()
@@ -206,8 +249,11 @@ class Learner(BaseModel):
         else:
             grammar_mastery = 0.5  # Neutral if no data
 
-        # Weight vocabulary slightly more
-        return vocab_mastery * 0.6 + grammar_mastery * 0.4
+        # Include pronunciation if available
+        pronunciation_mastery = self.calculate_pronunciation_mastery()
+
+        # Weight: 50% vocabulary, 30% grammar, 20% pronunciation
+        return vocab_mastery * 0.5 + grammar_mastery * 0.3 + pronunciation_mastery * 0.2
 
     def get_learning_summary(self) -> Dict[str, Any]:
         """Get a summary of learner progress."""
@@ -221,6 +267,8 @@ class Learner(BaseModel):
                 if v.status == VocabularyStatus.MASTERED
             ),
             "grammar patterns": len(self.grammar_patterns),
+            "pronunciation patterns": len(self.pronunciation_patterns),
+            "pronunciation mastery": f"{self.calculate_pronunciation_mastery():.1%}",
             "overall mastery": f"{self.calculate_overall_mastery():.1%}",
             "total conversations": self.stats.total_conversations,
             "last practiced": self.last_updated.strftime("%Y-%m-%d"),

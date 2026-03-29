@@ -381,6 +381,7 @@ Use English for the grammar explanation and pattern breakdown, then switch to {t
             TeachingStrategy.Explicit_explanation: "PAUSE THE CONVERSATION FLOW. Deliver a focused, structured grammar lesson with explicit explanations, clear examples, and breakdowns. This is teaching time, not casual chat.",
             TeachingStrategy.Pattern_highlighting: "Draw explicit attention to a specific grammar pattern. Show how it works, give clear examples, and explain when to use it. Be direct and instructional.",
             TeachingStrategy.Contextual_introduction: "Introduce new material naturally within the conversation flow. Weave it into context without breaking the conversational rhythm.",
+            TeachingStrategy.PRONUNCIATION_TEACHING: "PAUSE THE CONVERSATION FLOW. Provide a focused pronunciation tip. Explain how to produce the sound clearly, give practical tips, and encourage practice. Keep it brief (2-3 sentences) and actionable. End by asking them to try pronouncing a practice word.",
         }
 
         return guidance_map.get(strategy, "Converse naturally while being helpful and encouraging.")

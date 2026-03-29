@@ -22,7 +22,7 @@ from rich.table import Table
 sys.path.insert(0, str(Path(__file__).parent))
 
 from models.learner import Learner, ConfidenceLevel
-from agents import AgentConfig, ConversationAgent
+from agents import AgentConfig, ConversationAgent, PronunciationTeachingAgent
 from llm.client import LLMClient
 from memory.json_store import JSONMemoryStore
 
@@ -47,6 +47,7 @@ class LanguageLearningCLI:
         self.memory_store = JSONMemoryStore(data_dir)
         self.llm_client = None
         self.agent: Optional[ConversationAgent] = None
+        self.pronunciation_agent: Optional[PronunciationTeachingAgent] = None
         self.learner: Optional[Learner] = None
 
         # Session state
@@ -205,8 +206,26 @@ Let's get started!
             experimentation_mode=self.experimentation_mode,
         )
 
+        # Initialize pronunciation teaching agent
+        pronunciation_config = AgentConfig(
+            name="Pronunciation Teacher",
+            description="Teaches German pronunciation patterns",
+            target_language="german",
+        )
+        self.pronunciation_agent = PronunciationTeachingAgent(
+            config=pronunciation_config,
+            learner=self.learner,
+            llm_client=self.llm_client,
+        )
+
         # Show experimentation mode notice
         if self.experimentation_mode:
+            self.console.print("\n[yellow bold]🧪 Experimentation Mode Active[/yellow bold]")
+            self.console.print("[dim]Pedagogical triggers are accelerated for testing:[/dim]")
+            self.console.print("[dim]  • New material: every 2 turns (vs 10)[/dim]")
+            self.console.print("[dim]  • Reviews: every 3 turns (vs 8)[/dim]")
+            self.console.print("[dim]  • Minimum intro time: 30s (vs 3 min)[/dim]")
+            self.console.print("[dim]  • Pronunciation: every 3 turns (vs 15)[/dim]\n")
             self.console.print("\n[yellow bold]🧪 Experimentation Mode Active[/yellow bold]")
             self.console.print("[dim]Pedagogical triggers are accelerated for testing:[/dim]")
             self.console.print("[dim]  • New material: every 2 turns (vs 10)[/dim]")
@@ -251,12 +270,44 @@ Let's get started!
                     }
                 })
 
-                # Display response
-                self.console.print(Panel(
-                    result["response"],
-                    title="[bold green]Language Teacher[/bold green]",
-                    border_style="green"
-                ))
+                # Check if this is a pronunciation teaching decision
+                if result.get("teaching_action") == "teach_pronunciation":
+                    # Route to pronunciation agent
+                    # Extract recent words from vocabulary analysis
+                    analysis_data = result.get("metadata", {})
+                    recent_words = []
+                    # We'll pass an empty list for now; the pronunciation agent
+                    # can also select patterns independently of recent words
+
+                    pronunciation_result = self.pronunciation_agent.process({
+                        "learner": self.learner,
+                        "conversation_state": {"topic": topic},
+                        "recent_words": recent_words,
+                        "decision": result.get("teaching_decision"),
+                    })
+
+                    # Display pronunciation tip
+                    if pronunciation_result.get("explanation"):
+                        self.console.print(Panel(
+                            f"🎤 [bold]Pronunciation Tip:[/bold]\n\n{pronunciation_result['explanation']}\n\n"
+                            f"Practice word: [bold cyan]{pronunciation_result.get('practice_word', '')}[/bold cyan]",
+                            title="[bold magenta]Pronunciation[/bold magenta]",
+                            border_style="magenta"
+                        ))
+
+                    # Continue with conversation response
+                    self.console.print(Panel(
+                        result["response"],
+                        title="[bold green]Language Teacher[/bold green]",
+                        border_style="green"
+                    ))
+                else:
+                    # Display normal response
+                    self.console.print(Panel(
+                        result["response"],
+                        title="[bold green]Language Teacher[/bold green]",
+                        border_style="green"
+                    ))
 
                 # Show pedagogical action in experimentation mode
                 if self.experimentation_mode and result.get("teaching_action"):
@@ -265,7 +316,8 @@ Let's get started!
                         "introduce": "blue",
                         "review": "yellow",
                         "continue": "green",
-                        "simplify": "magenta"
+                        "simplify": "magenta",
+                        "teach_pronunciation": "cyan"
                     }
                     action_color = action_colors.get(result["teaching_action"], "white")
                     self.console.print(f"\n[dim][{action_color}]Action: {result['teaching_action'].upper()}[/{action_color}][/dim]")
@@ -336,9 +388,25 @@ Let's get started!
         # Grammar weaknesses
         weak_areas = self.learner.get_weak_grammar_areas(threshold=0.6)
         if weak_areas:
-            self.console.print("\n[bold yellow]Areas to work on:[/bold yellow]")
+            self.console.print("\n[bold yellow]Grammar areas to work on:[/bold yellow]")
             for pattern in weak_areas[:5]:
                 self.console.print(f"  • {pattern.name}: {pattern.mastery_score:.0%} mastery")
+
+        # Pronunciation progress
+        if self.learner.pronunciation_patterns:
+            self.console.print(f"\n[bold]Pronunciation patterns learned: {len(self.learner.pronunciation_patterns)}[/bold]")
+
+            pronunciation_mastery = self.learner.calculate_pronunciation_mastery()
+            self.console.print(f"Overall pronunciation mastery: {pronunciation_mastery:.0%}")
+
+            # Show patterns needing review
+            to_review = self.learner.get_pronunciation_patterns_to_review()
+            if to_review:
+                self.console.print("\n[bold yellow]Pronunciation patterns to review:[/bold yellow]")
+                for pattern in to_review[:5]:
+                    self.console.print(f"  • {pattern.name}: {pattern.mastery_score:.0%} mastery")
+        else:
+            self.console.print("\n[dim]No pronunciation patterns learned yet. Practice more to see pronunciation tips![/dim]")
 
     def _practice_vocabulary(self):
         """Practice vocabulary that needs review."""

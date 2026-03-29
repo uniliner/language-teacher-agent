@@ -18,6 +18,7 @@ class TeachingStrategy(str, Enum):
     Contextual_introduction = "contextual_introduction"  # Introduce in natural context
     Explicit_explanation = "explicit_explanation"  # Direct explanation with examples
     Pattern_highlighting = "pattern_highlighting"  # Draw attention to pattern
+    PRONUNCIATION_TEACHING = "pronunciation_teaching"  # Teach pronunciation patterns
 
     # Practice strategies
     SPACED_REPETITION = "spaced_repetition"  # Review at intervals

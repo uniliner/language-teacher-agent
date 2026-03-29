@@ -3,6 +3,7 @@
 from .learner import Learner, LearnerStats
 from .vocabulary import VocabularyItem, VocabularyStatus
 from .grammar import GrammarPattern, GrammarWeakness
+from .pronunciation import PronunciationPattern, PronunciationCategory
 
 __all__ = [
     "Learner",
@@ -11,4 +12,6 @@ __all__ = [
     "VocabularyStatus",
     "GrammarPattern",
     "GrammarWeakness",
+    "PronunciationPattern",
+    "PronunciationCategory",
 ]
