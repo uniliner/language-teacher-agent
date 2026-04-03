@@ -6,6 +6,7 @@ error detection, and pedagogical responses.
 """
 
 import os
+import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -208,6 +209,222 @@ Return a JSON object with this structure:
                 "naturalness": "unknown",
                 "confidence_level": "medium"
             }
+
+    def generate_orchestration_plan(
+        self,
+        learner_input: str,
+        detected_errors: List[Dict[str, Any]],
+        learner_state: Dict[str, Any],
+        conversation_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Generate an orchestration plan using agentic reasoning.
+
+        This is the "Reasoning" step in the ReAct loop. The LLM analyzes the
+        learner's situation and decides which specialist agents to call.
+
+        Implements a retry strategy with increasingly explicit prompts to handle
+        transient JSON parsing errors.
+
+        Args:
+            learner_input: What the learner said
+            detected_errors: Errors detected by analyze_learner_input()
+            learner_state: Current learner state (confidence, level, vocab, etc.)
+            conversation_context: Conversation context (topic, flow, etc.)
+
+        Returns:
+            Orchestration decision with keys:
+            - thoughts: LLM's reasoning
+            - actions: List of specialist calls to make
+            - teaching_strategy: Which teaching strategy to use
+            - confidence: How confident in this decision (0.0-1.0)
+            - response_guidance: Notes for response generation
+        """
+        from agents.orchestrator_prompts import (
+            ORCHESTRATOR_SYSTEM_PROMPT,
+            build_orchestration_prompt,
+            validate_orchestration_decision,
+        )
+
+        # Build the orchestration prompt
+        base_user_prompt = build_orchestration_prompt(
+            learner_input=learner_input,
+            detected_errors=detected_errors,
+            learner_state=learner_state,
+            conversation_context=conversation_context,
+        )
+
+        # Retry strategy with increasingly explicit instructions
+        retry_configs = [
+            {
+                "attempt": 1,
+                "system_prompt": ORCHESTRATOR_SYSTEM_PROMPT,
+                "user_prompt": base_user_prompt,
+                "temperature": 0.5,
+                "description": "Initial attempt with standard prompt",
+            },
+            {
+                "attempt": 2,
+                "system_prompt": ORCHESTRATOR_SYSTEM_PROMPT + "\n\nCRITICAL: You must respond with valid JSON only. Do not include any text before or after the JSON.",
+                "user_prompt": base_user_prompt + "\n\nREMEMBER: Return ONLY the JSON object. No other text.",
+                "temperature": 0.3,  # Lower temperature for more deterministic output
+                "description": "Retry with explicit JSON-only instruction",
+            },
+            {
+                "attempt": 3,
+                "system_prompt": ORCHESTRATOR_SYSTEM_PROMPT + "\n\nCRITICAL: Return valid JSON only. Start your response with '{' and end with '}'. No markdown, no explanation.",
+                "user_prompt": base_user_prompt + "\n\nReturn ONLY this JSON structure:\n{\n  \"thoughts\": \"...\",\n  \"actions\": [],\n  \"teaching_strategy\": \"...\",\n  \"confidence\": 0.0,\n  \"response_guidance\": \"...\"\n}\n\nNo other text!",
+                "temperature": 0.1,  # Very low temperature for consistency
+                "description": "Final retry with minimal temperature and explicit template",
+            },
+        ]
+
+        for retry_config in retry_configs:
+            try:
+                print(f"[Orchestration] Attempt {retry_config['attempt']}: {retry_config['description']}")
+
+                # Call LLM
+                response = self.client.messages.create(
+                    model=self.model,
+                    system=retry_config["system_prompt"],
+                    messages=[{"role": "user", "content": retry_config["user_prompt"]}],
+                    temperature=retry_config["temperature"],
+                    max_tokens=1000,
+                )
+
+                response_text = response.content[0].text
+
+                # Extract JSON from response (handle markdown code blocks)
+                if "```json" in response_text:
+                    json_text = response_text.split("```json")[1].split("```")[0].strip()
+                elif "```" in response_text:
+                    json_text = response_text.split("```")[1].split("```")[0].strip()
+                else:
+                    json_text = response_text.strip()
+
+                # Parse JSON response
+                decision = json.loads(json_text)
+
+                # Validate the decision
+                is_valid, validation_errors = validate_orchestration_decision(decision)
+
+                if not is_valid:
+                    print(f"[Orchestration] Attempt {retry_config['attempt']}: Validation failed: {validation_errors}")
+                    if retry_config["attempt"] < len(retry_configs):
+                        print(f"[Orchestration] Retrying with more explicit prompt...")
+                        continue
+                    else:
+                        print(f"[Orchestration] All retries exhausted. Using fallback.")
+                        print(f"[Orchestration] Invalid decision: {decision}")
+                        return self._get_fallback_orchestration(
+                            detected_errors=detected_errors,
+                            reason=f"Validation failed after {len(retry_configs)} attempts: {validation_errors}"
+                        )
+
+                # Success!
+                print(f"[Orchestration] Attempt {retry_config['attempt']}: Success!")
+                return decision
+
+            except json.JSONDecodeError as e:
+                print(f"[Orchestration] Attempt {retry_config['attempt']}: JSON decode error - {e}")
+                print(f"[Orchestration] Response text: {response_text[:200]}...")
+
+                if retry_config["attempt"] < len(retry_configs):
+                    print(f"[Orchestration] Retrying with more explicit prompt...")
+                    continue
+                else:
+                    print(f"[Orchestration] All retries exhausted. Using fallback.")
+                    return self._get_fallback_orchestration(
+                        detected_errors=detected_errors,
+                        reason=f"JSON parsing failed after {len(retry_configs)} attempts: {str(e)}"
+                    )
+
+            except Exception as e:
+                print(f"[Orchestration] Attempt {retry_config['attempt']}: Unexpected error - {e}")
+
+                if retry_config["attempt"] < len(retry_configs):
+                    print(f"[Orchestration] Retrying...")
+                    continue
+                else:
+                    print(f"[Orchestration] All retries exhausted. Using fallback.")
+                    return self._get_fallback_orchestration(
+                        detected_errors=detected_errors,
+                        reason=f"LLM call failed after {len(retry_configs)} attempts: {str(e)}"
+                    )
+
+        # Should never reach here, but just in case
+        return self._get_fallback_orchestration(
+            detected_errors=detected_errors,
+            reason="Unknown error in orchestration"
+        )
+
+    def _get_fallback_orchestration(
+        self,
+        detected_errors: List[Dict[str, Any]],
+        reason: str = "LLM orchestration failed"
+    ) -> Dict[str, Any]:
+        """
+        Get a fallback orchestration decision when LLM completely fails.
+
+        This is the LAST RESORT after all retry attempts are exhausted.
+        The system will use simple rule-based logic to ensure the conversation
+        can continue safely.
+
+        What happens when fallback is used:
+        1. If grammar errors exist → track them via grammar_curriculum specialist
+        2. Choose a safe teaching strategy (gentle correction or flow preservation)
+        3. Response generator will create a natural, encouraging response
+        4. Conversation continues without the benefit of LLM reasoning
+
+        Args:
+            detected_errors: Errors detected in learner input
+            reason: Why we fell back (for logging/debugging)
+
+        Returns:
+            Safe orchestration decision that keeps the conversation going
+        """
+        print(f"[Orchestration] Using fallback orchestration. Reason: {reason}")
+
+        # If there are grammar errors, track them
+        actions = []
+        grammar_errors = [e for e in detected_errors if e.get("type") == "grammar"]
+
+        if grammar_errors:
+            actions.append({
+                "specialist": "grammar_curriculum",
+                "purpose": "track_error",
+                "priority": 1,
+            })
+            print(f"[Orchestration] Fallback: Tracking {len(grammar_errors)} grammar error(s)")
+
+        # Default: gentle correction if errors, otherwise continue
+        teaching_strategy = "gentle_correction" if detected_errors else "flow_preservation"
+
+        # Build explicit response guidance based on situation
+        if detected_errors:
+            response_guidance = (
+                "Acknowledge what the learner said. "
+                "If errors are minor, model correct form gently. "
+                "If errors are major, provide gentle correction with encouragement. "
+                "Keep the conversation flowing naturally."
+            )
+        else:
+            response_guidance = (
+                "Learner input is grammatically correct. "
+                "Respond naturally and encourage them to continue. "
+                "Maybe ask a follow-up question to keep the conversation going."
+            )
+
+        return {
+            "thoughts": f"Using fallback orchestration due to: {reason}. "
+                       "Prioritizing error tracking and natural conversation flow.",
+            "actions": actions,
+            "teaching_strategy": teaching_strategy,
+            "confidence": 0.5,  # Low confidence since we're using fallback
+            "response_guidance": response_guidance,
+            "fallback_used": True,  # Flag to indicate fallback was used
+            "fallback_reason": reason,
+        }
 
     def generate_teaching_response(
         self,
