@@ -25,6 +25,7 @@ from models.learner import Learner, ConfidenceLevel
 from agents import AgentConfig, ConversationAgent, PronunciationTeachingAgent
 from llm.client import LLMClient
 from memory.json_store import JSONMemoryStore
+from speech import AzureSpeechClient, SpeechConfig
 
 
 class LanguageLearningCLI:
@@ -49,6 +50,7 @@ class LanguageLearningCLI:
         self.agent: Optional[ConversationAgent] = None
         self.pronunciation_agent: Optional[PronunciationTeachingAgent] = None
         self.learner: Optional[Learner] = None
+        self.speech_client: Optional[AzureSpeechClient] = None
 
         # Session state
         self.session_active = False
@@ -73,6 +75,242 @@ class LanguageLearningCLI:
         while True:
             if not self._main_menu():
                 break
+
+    def run_pronunciation_practice_mode(self):
+        """Run dedicated pronunciation practice mode."""
+        self._print_welcome()
+
+        # Get or create learner
+        learner_id = self._get_learner_id()
+        self.learner = self._load_or_create_learner(learner_id)
+
+        # Initialize speech client
+        speech_config = SpeechConfig.from_env()
+        if not speech_config:
+            self.console.print("[red]Azure Speech credentials not found. Please set AZURE_SPEECH_KEY and AZURE_SPEECH_REGION in .env[/red]")
+            sys.exit(1)
+
+        try:
+            self.speech_client = AzureSpeechClient(speech_config)
+            self.console.print("[green]✓ Audio features enabled[/green]\n")
+        except Exception as e:
+            self.console.print(f"[red]Failed to initialize audio features: {e}[/red]")
+            sys.exit(1)
+
+        # Initialize pronunciation agent
+        pronunciation_config = AgentConfig(
+            name="Pronunciation Teacher",
+            description="Teaches German pronunciation patterns",
+            target_language="german",
+        )
+        self.pronunciation_agent = PronunciationTeachingAgent(
+            config=pronunciation_config,
+            learner=self.learner,
+            speech_client=self.speech_client,
+        )
+
+        self.console.print(Panel(
+            "[bold cyan]🎤 Pronunciation Practice Mode[/bold cyan]\n\n"
+            "Practice your German pronunciation with:\n"
+            "• Listen to native pronunciation examples\n"
+            "• Record your own attempts\n"
+            "• Get instant feedback and accuracy scores\n"
+            "• Track your improvement over time",
+            title="Pronunciation Mode",
+            border_style="cyan"
+        ))
+
+        # Main practice loop
+        while True:
+            if not self._pronunciation_practice_menu():
+                break
+
+    def _pronunciation_practice_menu(self) -> bool:
+        """Show pronunciation practice menu."""
+        self.console.print("\n[bold]Pronunciation Practice Menu[/bold]")
+        self.console.print("1. Practice specific pattern")
+        self.console.print("2. Practice random pattern")
+        self.console.print("3. View my pronunciation progress")
+        self.console.print("4. Exit")
+
+        choice = Prompt.ask(
+            "\nChoose an option",
+            choices=["1", "2", "3", "4"],
+            default="4"
+        )
+
+        if choice == "1":
+            self._practice_specific_pattern()
+        elif choice == "2":
+            self._practice_random_pattern()
+        elif choice == "3":
+            self._view_pronunciation_progress()
+        elif choice == "4":
+            return False
+
+        return True
+
+    def _practice_specific_pattern(self):
+        """Practice a specific pronunciation pattern."""
+        patterns = self.pronunciation_agent.get_all_patterns()
+
+        if not patterns:
+            self.console.print("[yellow]No pronunciation patterns available[/yellow]")
+            return
+
+        # Display pattern options
+        self.console.print("\n[bold]Available Pronunciation Patterns:[/bold]\n")
+
+        for i, pattern in enumerate(patterns, 1):
+            examples_str = ", ".join(pattern.examples[:3])
+            self.console.print(f"{i}. [cyan]{pattern.name}[/cyan] - {pattern.description}")
+            self.console.print(f"   [dim]Examples: {examples_str}[/dim]\n")
+
+        choice = Prompt.ask(
+            "\nSelect a pattern (number)",
+            default="1"
+        )
+
+        try:
+            pattern_index = int(choice) - 1
+            if 0 <= pattern_index < len(patterns):
+                pattern = patterns[pattern_index]
+                self._practice_pattern_interactive(pattern)
+            else:
+                self.console.print("[red]Invalid pattern number[/red]")
+        except ValueError:
+            self.console.print("[red]Invalid input[/red]")
+
+    def _practice_random_pattern(self):
+        """Practice a random pronunciation pattern."""
+        import random
+
+        patterns = self.pronunciation_agent.get_all_patterns()
+        if not patterns:
+            self.console.print("[yellow]No pronunciation patterns available[/yellow]")
+            return
+
+        pattern = random.choice(patterns)
+        self.console.print(f"\n[dim]Selected: {pattern.name}[/dim]\n")
+        self._practice_pattern_interactive(pattern)
+
+    def _practice_pattern_interactive(self, pattern):
+        """
+        Interactive practice loop for a single pattern.
+
+        Args:
+            pattern: PronunciationPattern to practice
+        """
+        self.console.print(Panel(
+            f"[bold]{pattern.name}[/bold]\n\n"
+            f"{pattern.description}\n\n"
+            f"[dim]Teaching Notes: {pattern.teaching_notes}[/dim]\n\n"
+            f"[bold cyan]Examples:[/bold cyan] {', '.join(pattern.examples[:5])}",
+            title=f"Practice: {pattern.name}",
+            border_style="cyan"
+        ))
+
+        # Practice loop
+        while True:
+            self.console.print("\n[bold]Practice Options:[/bold]")
+            self.console.print("1. Listen to example")
+            self.console.print("2. Record your pronunciation")
+            self.console.print("3. Try a different example word")
+            self.console.print("4. Back to menu")
+
+            choice = Prompt.ask(
+                "\nChoose an option",
+                choices=["1", "2", "3", "4"],
+                default="1"
+            )
+
+            if choice == "1":
+                # Play audio for first example
+                example = pattern.examples[0]
+                self.console.print(f"\n[blue]🔊 Playing pronunciation of: [cyan]{example}[/cyan][/blue]")
+                audio = self.speech_client.synthesize_speech(example)
+                if audio:
+                    self.speech_client.play_audio(audio)
+                else:
+                    self.console.print("[yellow]Could not play audio[/yellow]")
+
+            elif choice == "2":
+                # Practice recording
+                example = pattern.examples[0]
+                self.console.print(f"\n[dim]Say: [cyan]{example}[/cyan][/dim]")
+                self.console.print("[dim]Press Enter when ready...[/dim]")
+                input()
+
+                self.console.print("\n[red]🔴 Recording...[/red]")
+                assessment = self.speech_client.assess_pronunciation(example)
+
+                if assessment:
+                    self._display_pronunciation_assessment(assessment)
+                else:
+                    self.console.print("[yellow]Could not assess pronunciation[/yellow]")
+
+            elif choice == "3":
+                # Show all examples and let user choose
+                self.console.print(f"\n[bold]Example words:[/bold]")
+                for i, example in enumerate(pattern.examples, 1):
+                    self.console.print(f"{i}. {example}")
+
+                ex_choice = Prompt.ask("\nChoose an example to practice", default="1")
+                try:
+                    ex_index = int(ex_choice) - 1
+                    if 0 <= ex_index < len(pattern.examples):
+                        chosen_example = pattern.examples[ex_index]
+                        self.console.print(f"\n[blue]🔊 Playing: [cyan]{chosen_example}[/cyan][/blue]")
+                        audio = self.speech_client.synthesize_speech(chosen_example)
+                        if audio:
+                            self.speech_client.play_audio(audio)
+
+                        self.console.print(f"\n[dim]Say: [cyan]{chosen_example}[/cyan][/dim]")
+                        self.console.print("[dim]Press Enter when ready...[/dim]")
+                        input()
+
+                        self.console.print("\n[red]🔴 Recording...[/red]")
+                        assessment = self.speech_client.assess_pronunciation(chosen_example)
+
+                        if assessment:
+                            self._display_pronunciation_assessment(assessment)
+                except (ValueError, IndexError):
+                    self.console.print("[red]Invalid choice[/red]")
+
+            elif choice == "4":
+                break
+
+    def _view_pronunciation_progress(self):
+        """View pronunciation learning progress."""
+        patterns = self.learner.pronunciation_patterns if hasattr(self.learner, 'pronunciation_patterns') else {}
+
+        if not patterns:
+            self.console.print("\n[dim]No pronunciation patterns practiced yet. Start practicing to track your progress![/dim]")
+            return
+
+        self.console.print("\n[bold]Pronunciation Progress:[/bold]\n")
+
+        table = Table(show_header=True)
+        table.add_column("Pattern", style="cyan")
+        table.add_column("Mastery", style="magenta")
+        table.add_column("Practices", style="yellow")
+
+        for pattern_id, pattern in patterns.items():
+            mastery_percentage = pattern.mastery_score * 100
+            if mastery_percentage >= 80:
+                mastery_style = "green"
+            elif mastery_percentage >= 60:
+                mastery_style = "yellow"
+            else:
+                mastery_style = "red"
+
+            table.add_row(
+                pattern.name,
+                f"[{mastery_style}]{mastery_percentage:.1f}%[/{mastery_style}]",
+                str(pattern.practice_count)
+            )
+
+        self.console.print(table)
 
     def _print_welcome(self):
         """Print welcome message."""
@@ -206,6 +444,18 @@ Let's get started!
             experimentation_mode=self.experimentation_mode,
         )
 
+        # Initialize speech client for audio features
+        speech_config = SpeechConfig.from_env()
+        if speech_config:
+            try:
+                self.speech_client = AzureSpeechClient(speech_config)
+                self.console.print("[green]✓ Audio features enabled[/green]")
+            except Exception as e:
+                self.console.print(f"[yellow]⚠ Could not initialize audio features: {e}[/yellow]")
+                self.console.print("[dim]Continuing without audio...[/dim]\n")
+        else:
+            self.console.print("[dim]No Azure Speech credentials found. Audio features disabled.[/dim]\n")
+
         # Initialize pronunciation teaching agent
         pronunciation_config = AgentConfig(
             name="Pronunciation Teacher",
@@ -216,6 +466,7 @@ Let's get started!
             config=pronunciation_config,
             learner=self.learner,
             llm_client=self.llm_client,
+            speech_client=self.speech_client,
         )
 
         # Show experimentation mode notice
@@ -288,12 +539,24 @@ Let's get started!
 
                     # Display pronunciation tip
                     if pronunciation_result.get("explanation"):
+                        practice_word = pronunciation_result.get('practice_word', '')
+
+                        # Play audio if available
+                        if pronunciation_result.get("audio_data") and self.speech_client:
+                            self.console.print("\n[blue]🔊 Playing pronunciation example...[/blue]")
+                            self.speech_client.play_audio(pronunciation_result["audio_data"])
+
+                        # Display the tip
                         self.console.print(Panel(
                             f"🎤 [bold]Pronunciation Tip:[/bold]\n\n{pronunciation_result['explanation']}\n\n"
-                            f"Practice word: [bold cyan]{pronunciation_result.get('practice_word', '')}[/bold cyan]",
+                            f"Practice word: [bold cyan]{practice_word}[/bold cyan]",
                             title="[bold magenta]Pronunciation[/bold magenta]",
                             border_style="magenta"
                         ))
+
+                        # Offer practice opportunity if speech client available
+                        if self.speech_client and practice_word:
+                            self._offer_pronunciation_practice(practice_word, pronunciation_result.get('pattern_id'))
 
                     # Continue with conversation response
                     self.console.print(Panel(
@@ -447,6 +710,103 @@ Let's get started!
             self.memory_store.save_learner(self.learner)
             self.console.print("[green]Level updated![/green]")
 
+    def _offer_pronunciation_practice(self, practice_word: str, pattern_id: Optional[str] = None):
+        """
+        Offer the user a chance to practice pronunciation with recording and assessment.
+
+        Args:
+            practice_word: The word to practice
+            pattern_id: Optional pattern ID being practiced
+        """
+        if not self.speech_client:
+            return
+
+        # Ask if user wants to practice
+        practice = Prompt.ask(
+            "\n🎤 Would you like to practice your pronunciation?",
+            choices=["yes", "no"],
+            default="no"
+        )
+
+        if practice != "yes":
+            return
+
+        self.console.print("\n[bold]Pronunciation Practice[/bold]")
+        self.console.print(f"[dim]Say this word: [cyan]{practice_word}[/cyan][/dim]")
+        self.console.print("[dim]Press Enter when ready to speak...[/dim]")
+
+        input()  # Wait for user to press Enter
+
+        # Record pronunciation
+        self.console.print("\n[red]🔴 Recording... Speak now![/red]")
+        assessment = self.speech_client.assess_pronunciation(practice_word)
+
+        if assessment:
+            # Display assessment results
+            self._display_pronunciation_assessment(assessment)
+        else:
+            self.console.print("[yellow]⚠ Could not assess pronunciation. Please try again.[/yellow]")
+
+    def _display_pronunciation_assessment(self, assessment):
+        """
+        Display pronunciation assessment results with visual feedback.
+
+        Args:
+            assessment: PronunciationAssessmentResult object
+        """
+        from rich.table import Table
+        from rich.progress import Progress, BarColumn, TextColumn
+
+        # Create results table
+        table = Table(title="\n📊 Pronunciation Assessment Results", show_header=True)
+        table.add_column("Metric", style="cyan")
+        table.add_column("Score", style="magenta")
+        table.add_column("Grade", style="green")
+
+        # Add scores with color coding
+        scores = {
+            "Accuracy": assessment.accuracy_score,
+            "Fluency": assessment.fluency_score,
+            "Completeness": assessment.completeness_score,
+            "Prosody": assessment.prosody_score,
+        }
+
+        for metric, score in scores.items():
+            percentage = score * 100
+            if percentage >= 90:
+                grade = "A"
+                style = "green"
+            elif percentage >= 80:
+                grade = "B"
+                style = "blue"
+            elif percentage >= 70:
+                grade = "C"
+                style = "yellow"
+            elif percentage >= 60:
+                grade = "D"
+                style = "orange"
+            else:
+                grade = "F"
+                style = "red"
+
+            table.add_row(metric, f"{percentage:.1f}%", f"[{style}]{grade}[/{style}]")
+
+        self.console.print(table)
+
+        # Overall score
+        overall = assessment.overall_score * 100
+        self.console.print(f"\n[bold]Overall Score: {overall:.1f}%[/bold]")
+
+        # Feedback message
+        feedback = assessment.get_feedback_message()
+        self.console.print(f"\n{feedback}")
+
+        # Error text if available (what was actually heard)
+        if assessment.error_text and assessment.error_text != assessment.error_text:
+            self.console.print(f"\n[dim]We heard: \"{assessment.error_text}\"[/dim]")
+
+        self.console.print()  # Blank line
+
 
 def main():
     """Main entry point."""
@@ -463,6 +823,11 @@ def main():
         action="store_true",
         help="Enable experimentation mode with accelerated pedagogical triggers for testing"
     )
+    parser.add_argument(
+        "--pronunciation-mode",
+        action="store_true",
+        help="Launch dedicated pronunciation practice mode for focused pronunciation exercises"
+    )
     args = parser.parse_args()
 
     # Ensure data directory exists
@@ -470,7 +835,12 @@ def main():
 
     # Run CLI
     cli = LanguageLearningCLI(data_dir=args.data_dir, experimentation_mode=args.experiment)
-    cli.run()
+
+    # Launch pronunciation practice mode if requested
+    if args.pronunciation_mode:
+        cli.run_pronunciation_practice_mode()
+    else:
+        cli.run()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,57 @@
+i can see that the user prompt (orchastrator_prompots.py file, build_orchestration_prompt function) contains both the learner_state and conversation_context.
+please explain why these are needed in each prompt to the llm - it seems that this is wasteful use of tokens.
+
+Looking at the code, you're right to question this. Let me analyze what's being sent:
+
+What Each Contains
+learner_state (lines 217-240):
+
+Confidence Level, CEFR Level, Total Turns
+Vocabulary size
+Grammar patterns mastered
+Recent error rate
+conversation_context (lines 243-264):
+
+Topic
+Turn Number (duplicate!)
+Conversation Flow Score
+Recent Conversation Summary
+The Redundancy Issue
+You're correct - there's real redundancy here:
+
+Turn Number appears twice as "Total Turns" and "Turn Number"
+Recent Conversation Summary may duplicate information the LLM already has from conversation history
+The formatting is verbose with markdown bullets and bold tags
+What's Actually Needed
+The orchestrator needs to make pedagogical decisions, so it requires:
+
+Essential:
+
+Confidence level (affects teaching strategy)
+Flow score (affects whether to interrupt/correct)
+Recent error rate (helps prioritize what to address)
+Grammar/vocabulary mastery (helps decide what to teach)
+Debatable:
+
+Topic (could be inferred from conversation)
+Turn number (only matters for very short conversations)
+Conversation summary (LLM can see the history)
+Optimization Options
+Quick win - Remove duplicate turn number and concise formatting:
+
+
+def _format_learner_state(state: Dict[str, Any]) -> str:
+    return f"Confidence: {state.get('confidence')} | Level: {state.get('cefr_level')} | Errors: {state.get('recent_error_rate', 0):.0%} | Vocab: {state.get('vocabulary_size', 0)} words | Grammar: {state.get('grammar_patterns_mastered', 0)}/{state.get('grammar_patterns_total', 0)} mastered"
+Aggressive - Send only what changes per turn:
+
+
+minimal_state = {
+    "confidence": learner_state['confidence'],
+    "flow": conversation_context['flow_score'],
+    "error_rate": learner_state.get('recent_error_rate')
+}
+Would you like me to refactor this to be more token-efficient? I can:
+
+Remove the duplicate turn number
+Compress the formatting
+Make conversation summary optional

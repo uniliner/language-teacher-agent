@@ -16,6 +16,7 @@ from .base import Agent, AgentConfig
 from models.pronunciation import PronunciationPattern, PronunciationCategory
 from models.learner import Learner
 from llm.client import LLMClient
+from speech import AzureSpeechClient, SpeechConfig
 
 
 class PronunciationTeachingAgent(Agent):
@@ -34,6 +35,7 @@ class PronunciationTeachingAgent(Agent):
         learner: Learner,
         llm_client: Optional[LLMClient] = None,
         patterns_file: Optional[str] = None,
+        speech_client: Optional[AzureSpeechClient] = None,
     ):
         """
         Initialize the pronunciation teaching agent.
@@ -43,12 +45,16 @@ class PronunciationTeachingAgent(Agent):
             learner: Learner state
             llm_client: LLM client for generating content
             patterns_file: Path to pronunciation patterns JSON file
+            speech_client: Optional Azure Speech client for audio features
         """
         super().__init__(config, learner, llm_client)
 
         # Load pronunciation patterns database
         self.patterns_file = patterns_file or self._find_patterns_file()
         self.patterns_database = self._load_patterns()
+
+        # Initialize speech client for audio features
+        self.speech_client = speech_client
 
     def _find_patterns_file(self) -> str:
         """Find the pronunciation patterns JSON file."""
@@ -92,13 +98,23 @@ class PronunciationTeachingAgent(Agent):
 
     def get_capabilities(self) -> list[str]:
         """Return what this agent can do."""
-        return [
+        capabilities = [
             "teach pronunciation patterns",
             "demonstrate sound production",
             "identify common pronunciation mistakes",
             "track pronunciation progress with spaced repetition",
             "provide personalized pronunciation feedback",
         ]
+
+        # Add audio capabilities if speech client is available
+        if self.speech_client:
+            capabilities.extend([
+                "play audio pronunciation examples",
+                "record learner pronunciation attempts",
+                "assess pronunciation accuracy",
+            ])
+
+        return capabilities
 
     def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -277,12 +293,20 @@ class PronunciationTeachingAgent(Agent):
         """
         if not self.llm_client:
             # Fallback to static content
-            return {
+            practice_word = pattern.examples[0] if pattern.examples else ""
+            teaching_content = {
                 "explanation": f"{pattern.description}. {pattern.teaching_notes}",
-                "practice_word": pattern.examples[0] if pattern.examples else "",
+                "practice_word": practice_word,
                 "pattern_id": pattern.pattern_id,
                 "pattern_name": pattern.name,
             }
+
+            # Add synthesized audio if speech client available
+            if self.speech_client and practice_word:
+                audio = self.speech_client.synthesize_speech(text=practice_word, language="de-DE")
+                teaching_content["audio_data"] = audio
+
+            return teaching_content
 
         # Build prompt for LLM
         prompt = self._build_teaching_prompt(pattern, learner, conversation_state)
@@ -295,22 +319,38 @@ class PronunciationTeachingAgent(Agent):
                 max_tokens=400,
             )
 
-            return {
+            practice_word = pattern.examples[0] if pattern.examples else ""
+            teaching_content = {
                 "explanation": response,
-                "practice_word": pattern.examples[0] if pattern.examples else "",
+                "practice_word": practice_word,
                 "pattern_id": pattern.pattern_id,
                 "pattern_name": pattern.name,
                 "all_examples": pattern.examples,
             }
+
+            # Add synthesized audio if speech client available
+            if self.speech_client and practice_word:
+                audio = self.speech_client.synthesize_speech(text=practice_word, language="de-DE")
+                teaching_content["audio_data"] = audio
+
+            return teaching_content
         except Exception as e:
             print(f"Error generating pronunciation content: {e}")
             # Fallback
-            return {
+            practice_word = pattern.examples[0] if pattern.examples else ""
+            teaching_content = {
                 "explanation": f"{pattern.description}. {pattern.teaching_notes}",
-                "practice_word": pattern.examples[0] if pattern.examples else "",
+                "practice_word": practice_word,
                 "pattern_id": pattern.pattern_id,
                 "pattern_name": pattern.name,
             }
+
+            # Try to add audio even if LLM failed
+            if self.speech_client and practice_word:
+                audio = self.speech_client.synthesize_speech(text=practice_word, language="de-DE")
+                teaching_content["audio_data"] = audio
+
+            return teaching_content
 
     def _build_teaching_prompt(
         self,
