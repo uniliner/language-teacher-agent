@@ -86,6 +86,9 @@ class Learner(BaseModel):
     correction_sensitivity: str = "balanced"  # strict, balanced, gentle
     preferred_response_length: str = "medium"  # short, medium, long
 
+    # Grammar teaching state (for GrammarCurriculumAgent learning and adaptation)
+    grammar_teaching_state: Optional[Dict[str, Any]] = Field(default=None)
+
     def get_vocabulary(self, word: str) -> Optional[VocabularyItem]:
         """Get vocabulary item by word."""
         return self.vocabulary.get(word.lower())
