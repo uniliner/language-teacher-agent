@@ -819,6 +819,246 @@ If action is "wait", set pattern to "null" and teaching_approach to "none"."""
         print(f"[GrammarCurriculum] Reinforced pattern: {pattern_name}")
         return True
 
+    def _track_teaching_effectiveness(
+        self,
+        teaching_action: Dict,
+        result: Dict,
+        current_turn_errors: List[Dict],
+        context: Dict
+    ) -> None:
+        """
+        Did our teaching work?
+
+        DESIGN: We evaluate effectiveness in TWO places:
+        1. HERE (called at END of turn): Check if previous teaching helped in THIS turn
+        2. NEXT TURN: Check if current teaching helps in the FOLLOWING turn
+
+        This bridges the timing gap by:
+        - Storing pending teaching action when we teach
+        - Evaluating it when we see the next learner input
+        - Checking both immediate and next-turn effectiveness
+
+        Args:
+            teaching_action: The teaching action we took (dict with pattern, strategy, etc.)
+            result: The result of executing the teaching action
+            current_turn_errors: Errors that occurred in this turn
+            context: Full teaching context for learning style detection
+        """
+        # Step 1: Evaluate PREVIOUS teaching action (from last turn)
+        if self._pending_teaching_action is not None:
+            previous_pattern = self._pending_teaching_action["pattern"]
+            previous_strategy = self._pending_teaching_action["teaching_approach"]
+
+            # Check if learner used previous pattern correctly in THIS turn
+            success = self._check_pattern_usage_in_current_turn(
+                previous_pattern, current_turn_errors
+            )
+
+            # Update strategy tracker with results
+            if previous_strategy not in self.teaching_strategy_tracker:
+                self.teaching_strategy_tracker[previous_strategy] = StrategyStats(
+                    strategy_name=previous_strategy
+                )
+
+            self.teaching_strategy_tracker[previous_strategy].attempts += 1
+            if success:
+                self.teaching_strategy_tracker[previous_strategy].successful_corrections += 1
+
+            # Update learner profile
+            pattern_data = self.learner.grammar_patterns.get(previous_pattern)
+            pattern_mastery_data = {
+                "attempts": pattern_data.attempts if pattern_data else 0,
+                "mastery_score": pattern_data.mastery_score if pattern_data else 0.0,
+            }
+            self.learner_profile.update_from_teaching_result(
+                previous_pattern, previous_strategy, success, pattern_mastery_data
+            )
+
+            print(f"[GrammarCurriculum] Teaching effectiveness: {previous_strategy} for {previous_pattern} -> {'✓' if success else '✗'}")
+
+        # Step 2: Store CURRENT teaching action for NEXT turn evaluation
+        if result.get("action") in ["introduce_pattern", "review_pattern", "reinforce_pattern"]:
+            self._pending_teaching_action = {
+                "pattern": teaching_action["pattern"],
+                "teaching_approach": teaching_action["teaching_approach"],
+                "timestamp": datetime.now(),
+            }
+        else:
+            self._pending_teaching_action = None
+
+        # Step 3: Periodically run learning style detection (throttled)
+        self._detect_learning_style(context)
+
+    def _check_pattern_usage_in_current_turn(
+        self,
+        pattern_name: str,
+        current_errors: List[Dict]
+    ) -> bool:
+        """
+        Check if learner used the pattern correctly in the current turn.
+
+        ⚠️ **LIMITATION**: This implementation checks only for absence of errors.
+        It does NOT confirm the learner actually attempted to use the pattern.
+        They may have simply not encountered a context requiring it.
+
+        Current implementation returns True if:
+        - No errors in this pattern's category
+
+        This may OVERESTIMATE teaching effectiveness.
+
+        **STRICTER IMPLEMENTATION** (recommended before production):
+        - Option 1: Check learner input for grammar category tokens
+        - Option 2: Track explicit practice attempts
+        - Option 3: Use multi-turn window with decay
+
+        Args:
+            pattern_name: Name of the pattern to check
+            current_errors: List of errors in current turn
+
+        Returns:
+            True if pattern was used correctly (or no errors in category)
+        """
+        pattern_category = self._get_pattern_category(pattern_name)
+
+        # Check if any errors in this pattern's category
+        for error in current_errors:
+            if error.get("category") == pattern_category:
+                return False  # Error in this category = not successful
+
+        # ⚠️ Simplified check: absence of errors != pattern was used
+        # TODO: Implement stricter signal before production
+        return True
+
+    def _get_pattern_category(self, pattern_name: str) -> str:
+        """
+        Get category for a pattern (for grouping related patterns).
+
+        IMPLEMENTATION: Lookup from curriculum definition
+
+        Args:
+            pattern_name: Name of the pattern
+
+        Returns:
+            Category name as string
+        """
+        pattern = self._pattern_map.get(pattern_name)
+        if pattern:
+            return pattern.category.value
+        return "general"
+
+    def _detect_learning_style(self, context: Dict) -> None:
+        """
+        Detect learner's grammar learning style using LLM analysis.
+
+        This method is throttled to run every 50 turns to avoid excessive LLM calls.
+        When triggered, it analyzes recent learner interactions to determine:
+        - Learning style (analytical, visual, immersion)
+        - Effective teaching methods
+        - Patterns they struggle with
+        - Patterns they excel at
+
+        Args:
+            context: Teaching context with learner state and conversation data
+        """
+        # Increment counter
+        self._learning_style_detection_turns += 1
+
+        # Check if we should run detection (throttled)
+        if self._learning_style_detection_turns < self._learning_style_detection_interval:
+            return
+
+        # Reset counter
+        self._learning_style_detection_turns = 0
+
+        # Check if LLM client is available
+        if not self.llm_client:
+            print("[GrammarCurriculum] No LLM client available for learning style detection")
+            return
+
+        print("[GrammarCurriculum] Running learning style detection...")
+
+        try:
+            # Build prompt for learning style detection
+            learner_state = context["learner_state"]
+            recent_errors = learner_state["recent_errors"]
+            mastered_patterns = list(learner_state["mastered_patterns"].keys())
+
+            # Collect strategy effectiveness data
+            strategy_effectiveness = []
+            for strategy_name, stats in self.teaching_strategy_tracker.items():
+                if stats.attempts > 0:
+                    strategy_effectiveness.append(
+                        f"{strategy_name}: {stats.success_rate:.1%} success rate ({stats.attempts} attempts)"
+                    )
+
+            prompt = f"""You are analyzing this learner's grammar learning patterns.
+
+Recent Grammar Interactions:
+- Errors in last few turns: {recent_errors}
+- Mastered patterns: {mastered_patterns}
+- Teaching strategy effectiveness: {strategy_effectiveness if strategy_effectiveness else "No data yet"}
+- Current profile: {self.learner_profile.learning_style} learner
+
+Determine:
+1. Learning style (analytical | visual | immersion | unknown)
+2. Most effective teaching methods
+3. Patterns they struggle with
+4. Patterns they excel at
+
+Return ONLY valid JSON in this format:
+{{
+    "learning_style": "analytical" | "visual" | "immersion" | "unknown",
+    "effective_methods": ["method1", "method2"],
+    "struggle_patterns": ["pattern1", "pattern2"],
+    "strength_patterns": ["pattern1", "pattern2"]
+}}
+
+Learning styles:
+- analytical: Prefers rules, explanations, explicit grammar instruction
+- visual: Prefers examples, patterns, color-coded highlighting
+- immersion: Prefers learning through context, conversation, exposure
+- unknown: Not enough data to determine
+"""
+
+            response = self.llm_client.generate_response(
+                system_prompt="You are a language learning pedagogy expert. Always respond with valid JSON only.",
+                user_message=prompt,
+                temperature=0.3,
+                max_tokens=200,
+            )
+
+            # Parse JSON response
+            detection_result = json.loads(response)
+
+            # Update learner profile with detected learning style
+            if "learning_style" in detection_result:
+                self.learner_profile.update_learning_style(detection_result["learning_style"])
+                print(f"[GrammarCurriculum] Detected learning style: {detection_result['learning_style']}")
+
+            # Update effective methods if provided
+            if "effective_methods" in detection_result:
+                for method in detection_result["effective_methods"]:
+                    if method not in self.learner_profile.effective_teaching_methods:
+                        self.learner_profile.effective_teaching_methods.append(method)
+
+            # Update struggle patterns if provided
+            if "struggle_patterns" in detection_result:
+                for pattern in detection_result["struggle_patterns"]:
+                    if pattern not in self.learner_profile.error_prone_patterns:
+                        self.learner_profile.error_prone_patterns.append(pattern)
+
+            # Update strength patterns if provided
+            if "strength_patterns" in detection_result:
+                for pattern in detection_result["strength_patterns"]:
+                    if pattern not in self.learner_profile.strength_patterns:
+                        self.learner_profile.strength_patterns.append(pattern)
+
+            print("[GrammarCurriculum] Learning style detection completed successfully")
+
+        except Exception as e:
+            print(f"[GrammarCurriculum] Learning style detection failed: {e}")
+            # Don't update profile on failure - keep existing data
+
     def get_capabilities(self) -> List[str]:
         """Return what this agent can do."""
         return [
@@ -827,6 +1067,12 @@ If action is "wait", set pattern to "null" and teaching_approach to "none"."""
             "track learner progress through curriculum",
             "determine readiness to advance to next pattern",
             "suggest next focus pattern based on mastery",
+            # Phase 2: Learning & Adaptation capabilities
+            "learn which teaching strategies work for individual learners",
+            "track teaching effectiveness over time",
+            "adapt teaching approach based on learner profile",
+            "detect learner's grammar learning style (analytical/visual/immersion)",
+            "remember teaching insights across sessions (persistence)",
         ]
 
     def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -875,10 +1121,13 @@ If action is "wait", set pattern to "null" and teaching_approach to "none"."""
         errors = input_data.get("errors", [])
         patterns_updated = self._process_errors(errors)
 
-        # Step 5: REFLECT - Track effectiveness (placeholder for Phase 2)
-        # In Phase 2, this will call _track_teaching_effectiveness()
-        # For now, we just log the action
-        print(f"[GrammarCurriculum] Action: {result['action']}, Pattern: {result.get('pattern', 'N/A')}")
+        # Step 5: REFLECT - Track effectiveness and learn from results
+        self._track_teaching_effectiveness(
+            teaching_action=teaching_plan,  # The action we took
+            result=result,                   # The result of executing it
+            current_turn_errors=errors,      # Errors in this turn
+            context=context                  # Full context for learning style detection
+        )
 
         # Step 6: UPDATE - Save teaching state for persistence
         self._save_teaching_state()

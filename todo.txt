@@ -1,0 +1,1 @@
+1. _check_pattern_usage_in_current_turn() - full implementation
