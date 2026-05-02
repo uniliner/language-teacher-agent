@@ -11,15 +11,15 @@
 **Phase Breakdown** (in execution order: 1→2→3→4→5):
 - Phase 1 (Foundation): 2 hours
 - Phase 2 (Learning): 5 hours (increased from 3 for integration testing)
-- Phase 3 (Proactive Teaching): 2 hours
-- Phase 4 (Context Awareness): 2 hours
-- Phase 5 (Dynamic Curriculum): 2 hours
+- Phase 3 (Adaptive Curriculum): 2 hours - Strategic: WHAT order to teach patterns
+- Phase 4 (Teaching Timing): 2 hours - Tactical: WHEN to teach in conversation
+- Phase 5 (Timing Refinement): 2 hours - Advanced: Sophisticated flow & timing
 - Testing & Integration: 2 hours
 - **Total**: 15 hours + 1 hour buffer = 16 hours
 
 **Recommended Implementation Order**: 1 → 2 → 3 → 4 → 5 (follow the checklist)
 
-**Rationale**: Phase 5 (Dynamic Curriculum) requires a working `LearnerGrammarProfile` from Phase 2. Phases 3 and 4 build on Phase 2.
+**Rationale**: Phases 3→4→5 form a natural progression from strategic curriculum design to tactical teaching decisions to sophisticated timing. Each builds on the learner profiling from Phase 2.
 
 **Learning Focus**: Building autonomous agents with learning capabilities, LLM-driven decision making, and adaptive curriculum management
 
@@ -171,9 +171,18 @@ def should_teach_grammar(self, context: Dict) -> bool:
 **Implementation Order**: Phases are numbered in the recommended sequence (1→2→3→4→5).
 
 **Rationale for Phase Ordering**:
-- Phase 5 (Dynamic Curriculum) comes last because it requires a working `LearnerGrammarProfile` from Phase 2
-- Phases 3 and 4 (Proactive Teaching, Context Awareness) provide immediate value and build directly on Phase 2
+- Phase 5 (Teaching Timing) comes last because it requires a working `LearnerGrammarProfile` from Phase 2
+- Phases 3 and 4 provide distinct but complementary capabilities:
+  - **Phase 3 (Strategic)**: Adaptive curriculum sequencing - WHAT order to teach patterns
+  - **Phase 4 (Tactical)**: Real-time teaching decisions - WHEN to teach in conversation
 - Each phase naturally depends on the previous ones
+
+**IMPORTANT CLARIFICATION**: The terms "proactive teaching" in earlier phases refer to different concepts:
+- **Phase 3**: Proactive curriculum design - restructuring the learning path based on learner profile
+- **Phase 4**: Proactive teaching moments - identifying opportunities to teach before errors occur in conversation
+- **Phase 5**: Proactive timing refinement - sophisticated flow-aware decisions about when to interrupt
+
+Think of it as: Phase 3 designs the curriculum, Phase 4 decides when to use it, Phase 5 refines the timing.
 
 ---
 
@@ -422,7 +431,7 @@ class GrammarCurriculumAgent(Agent):
     # - Reduces redundant LLM calls across learners
     # - Trade-off: One learner's topics benefit all learners (acceptable)
     _topic_grammar_cache: ClassVar[Dict[str, List[str]]] = {
-        "daily routine": ["separable_verbs_basic", "present_tense_regular"],
+        "daily routine": ["separable_verbs_basic", "presernt_tense_egular"],
         "past events": ["perfect_tense_haben", "perfect_tense_sein"],
         "describing things": ["adjective_endings_basic", "noun_gender"],
         "family": ["definite_articles_nominative", "possessive_articles"],
@@ -650,8 +659,10 @@ def _check_pattern_usage_in_current_turn(
 
 ---
 
-### Phase 2: Learning (5 hours)
-**Goal**: Teach grammar BEFORE errors occur
+### Phase 3: Adaptive Curriculum Management (2 hours)
+**Goal**: Personalize curriculum sequencing based on learner strengths and weaknesses
+
+**STRATEGIC FOCUS**: This phase restructures the learning path itself - determining WHAT order patterns should be taught in, based on learner profile. Contrast with Phase 4's tactical focus on WHEN to teach specific patterns in conversation.
 
 #### 3.1 Predictive Teaching
 ```python
@@ -691,11 +702,16 @@ def get_adaptive_curriculum_order(self, learner: Learner) -> List[str]:
     Algorithm:
     1. Start with base A1 → B1 sequence
     2. Identify learner's weak areas
-    3. Move related patterns earlier for reinforcement
+    3. Move THOSE weak patterns earlier (for reinforcement practice)
     4. Identify learner's strengths
-    5. Move advanced dependent patterns earlier (they can handle it)
+    5. Move DEPENDENT/ADVANCED patterns earlier (accelerate past mastered prerequisites)
     6. Respect prerequisites
     7. Maximize learning efficiency
+
+    KEY DISTINCTION:
+    - Weak areas: Move the weak patterns themselves earlier (e.g., basic case patterns from positions 15,25 → 8,18)
+    - Strong areas: Move patterns that DEPEND on strengths earlier (e.g., if strong in "basic verbs", move "advanced verb tenses" from position 30 → 20)
+    - Result: Weak fundamentals get front-loaded practice; strong fundamentals unlock advanced content faster
     """
     base_order = [p.name for p in self.GERMAN_GRAMMAR_CURRICULUM]
 
@@ -722,7 +738,15 @@ def _reorder_for_reinforcement(
     weaknesses: List[str]
 ) -> List[str]:
     """
-    Move related patterns earlier for extra practice.
+    Move the weak patterns THEMSELVES earlier for extra practice.
+
+    EXAMPLE: If learner struggles with "accusative_case" (weakness):
+    - Before: accusative_case at position 15
+    - After: accusative_case at position 8 (earlier for more practice)
+
+    CONTRAST with _reorder_for_acceleration:
+    - Reinforcement: Move the WEAK pattern earlier (the pattern itself)
+    - Acceleration: Move DEPENDENT patterns earlier (what comes after strengths)
 
     If learner struggles with "case", move all case patterns earlier
     and add more spacing between them for practice.
@@ -790,10 +814,12 @@ def _get_pattern_category(self, pattern_name: str) -> str:
 
 ---
 
-### Phase 4: Context-Aware Decision Making (2 hours)
-**Goal**: Make smart decisions about when to teach
+### Phase 4: Context-Aware Teaching Timing (2 hours)
+**Goal**: Make smart decisions about WHEN to teach in conversation
 
-#### 4.1 Predictive Teaching
+**TACTICAL FOCUS**: This phase handles real-time teaching decisions - WHETHER to interrupt conversation flow NOW to teach grammar. It uses the adaptive curriculum from Phase 3 but focuses on timing, flow, and conversation context. Contrast with Phase 3's strategic focus on curriculum sequencing.
+
+#### 4.1 Topic-Based Proactive Teaching
 ```python
 def should_proactively_teach(self, context: Dict) -> Optional[Dict]:
     """
@@ -828,58 +854,69 @@ def should_proactively_teach(self, context: Dict) -> Optional[Dict]:
                 "action": "review_pattern",
                 "pattern": pattern_name,
                 "reason": f"Topic '{conversation_topic}' uses this grammar",
+                "timing": "before_topic",
+            }
 
-\n        # Cache empty results to prevent repeated LLM calls for topics with no grammar mapping\n        self._topic_grammar_cache[topic_lower] = []\n        return []
-    # Check cache first (including failed lookups)\n    topic_lower = topic.lower().strip()\n    if topic_lower in self._topic_grammar_cache:\n        cached = self._topic_grammar_cache[topic_lower]\n        # Empty list sentinel means "we checked, no patterns found"\n        return cached if cached != [] else []
-    # Check cache first (including failed lookups)\n    topic_lower = topic.lower().strip()\n    if topic_lower in self._topic_grammar_cache:\n        cached = self._topic_grammar_cache[topic_lower]\n        # Empty list sentinel means "we checked, no patterns found"\n        return cached if cached != [] else []
-    # Check cache first (including failed lookups)\n    topic_lower = topic.lower().strip()\n    if topic_lower in self._topic_grammar_cache:\n        cached = self._topic_grammar_cache[topic_lower]\n        # Empty list sentinel means "we checked, no patterns found"\n        return cached if cached != [] else []
-    # Check cache first (including failed lookups)\n    topic_lower = topic.lower().strip()\n    if topic_lower in self._topic_grammar_cache:\n        cached = self._topic_grammar_cache[topic_lower]\n        # Empty list sentinel means "we checked, no patterns found"\n        return cached if cached != [] else []
-    # Check cache first (including failed lookups)\n    topic_lower = topic.lower().strip()\n    if topic_lower in self._topic_grammar_cache:\n        cached = self._topic_grammar_cache[topic_lower]\n        # Empty list sentinel means "we checked, no patterns found"\n        return cached if cached != [] else []
-    # Check cache first (including failed lookups)\n    topic_lower = topic.lower().strip()\n    if topic_lower in self._topic_grammar_cache:\n        cached = self._topic_grammar_cache[topic_lower]\n        # Empty list sentinel means "we checked, no patterns found"\n        return cached if cached != [] else []
-    # Check cache first (including failed lookups)\n    topic_lower = topic.lower().strip()\n    if topic_lower in self._topic_grammar_cache:\n        cached = self._topic_grammar_cache[topic_lower]\n        # Empty list sentinel means "we checked, no patterns found"\n        return cached if cached != [] else []
-    # Check cache first (including failed lookups)\n    topic_lower = topic.lower().strip()\n    if topic_lower in self._topic_grammar_cache:\n        cached = self._topic_grammar_cache[topic_lower]\n        # Empty list sentinel means "we checked, no patterns found"\n        return cached if cached != [] else []
-    # Check cache first (including failed lookups)\n    topic_lower = topic.lower().strip()\n    if topic_lower in self._topic_grammar_cache:\n        cached = self._topic_grammar_cache[topic_lower]\n        # Empty list sentinel means "we checked, no patterns found"\n        return cached if cached != [] else []
-    # Check cache first (including failed lookups)\n    topic_lower = topic.lower().strip()\n    if topic_lower in self._topic_grammar_cache:\n        cached = self._topic_grammar_cache[topic_lower]\n        # Empty list sentinel means "we checked, no patterns found"\n        return cached if cached != [] else []
-    # Check cache first (including failed lookups)\n    topic_lower = topic.lower().strip()\n    if topic_lower in self._topic_grammar_cache:\n        cached = self._topic_grammar_cache[topic_lower]\n        # Empty list sentinel means "we checked, no patterns found"\n        return cached if cached != [] else []
-    # Check cache first (including failed lookups)\n    topic_lower = topic.lower().strip()\n    if topic_lower in self._topic_grammar_cache:\n        cached = self._topic_grammar_cache[topic_lower]\n        # Empty list sentinel means "we checked, no patterns found"\n        return cached if cached != [] else []
-    # Check cache first (including failed lookups)\n    topic_lower = topic.lower().strip()\n    if topic_lower in self._topic_grammar_cache:\n        cached = self._topic_grammar_cache[topic_lower]\n        # Empty list sentinel means "we checked, no patterns found"\n        return cached if cached != [] else []
-    # Check cache first (including failed lookups)\n    topic_lower = topic.lower().strip()\n    if topic_lower in self._topic_grammar_cache:\n        cached = self._topic_grammar_cache[topic_lower]\n        # Empty list sentinel means "we checked, no patterns found"\n        return cached if cached != [] else []
-    # Check cache first (including failed lookups)\n    topic_lower = topic.lower().strip()\n    if topic_lower in self._topic_grammar_cache:\n        cached = self._topic_grammar_cache[topic_lower]\n        # Empty list sentinel means "we checked, no patterns found"\n        return cached if cached != [] else []
-    # Check cache first (including failed lookups)\n    topic_lower = topic.lower().strip()\n    if topic_lower in self._topic_grammar_cache:\n        cached = self._topic_grammar_cache[topic_lower]\n        # Empty list sentinel means "we checked, no patterns found"\n        return cached if cached != [] else []
-    # Check cache first (including failed lookups)\n    topic_lower = topic.lower().strip()\n    if topic_lower in self._topic_grammar_cache:\n        cached = self._topic_grammar_cache[topic_lower]\n        # Empty list sentinel means "we checked, no patterns found"\n        return cached if cached != [] else []
-    # Check cache first (including failed lookups)\n    topic_lower = topic.lower().strip()\n    if topic_lower in self._topic_grammar_cache:\n        cached = self._topic_grammar_cache[topic_lower]\n        # Empty list sentinel means "we checked, no patterns found"\n        return cached if cached != [] else []
-    2. If not found, use LLM to determine relevant grammar
-    3. Cache LLM result for future use
-    """
-    # Check cache first
-    topic_lower = topic.lower().strip()
-    if topic_lower in self._topic_grammar_cache:
-        return self._topic_grammar_cache[topic_lower]
-
-    # LLM fallback for unknown topics
-    prompt = f"""Given the conversation topic "{topic}", which German grammar patterns from this list are most relevant?
+    def _get_grammar_for_topic(self, topic: str) -> List[str]:
+        """
+        Get relevant grammar patterns for a conversation topic.
+        
+        Uses a hybrid approach:
+        1. Check static cache first (common topics)
+        2. If not found, use LLM to determine relevant grammar  
+        3. Cache LLM result for future use
+        
+        Args:
+            topic: Conversation topic (e.g., "food", "daily routine")
+            
+        Returns:
+            List of grammar pattern names relevant to this topic
+            
+        Design Notes:
+            - Checks cache first to avoid redundant LLM calls
+            - Uses LLM to determine grammar patterns for unknown topics
+            - Caches empty results to prevent repeated LLM calls for topics with no grammar mapping
+            - Returns cached results (including empty lists) to prevent retry loops
+        """
+        # Check cache first (including failed lookups)
+        topic_lower = topic.lower().strip()
+        if topic_lower in self._topic_grammar_cache:
+            cached = self._topic_grammar_cache[topic_lower]
+            # Empty list sentinel means "we checked, no patterns found"
+            return cached if cached != [] else []
+        
+        # LLM fallback for unknown topics
+        if self.llm_client is None:
+            return []  # No LLM available, return empty list
+        
+        try:
+            prompt = f"""Given the conversation topic "{topic}", which German grammar patterns from this list are most relevant?
 
 Available patterns:
 {', '.join([p.name for p in self.GERMAN_GRAMMAR_CURRICULUM[:20]])}
 
+Return only the pattern names, separated by commas, most relevant first."""
 
-    except Exception:\n        # On error, cache empty result to prevent retry loop\n        self._topic_grammar_cache[topic_lower] = []\n        return []/
-            max_tokens=100
-        )
+            response = self.llm_client.client.messages.create(
+                model="claude-3-haiku-20240307",
+                max_tokens=100,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            
+            # Parse response and return valid pattern names
+            response_text = response.content[0].text
+            suggested_patterns = [p.strip() for p in response_text.split(',')]
+            valid_patterns = [p for p in suggested_patterns if p in self._pattern_map]
 
-        # Parse response and return valid pattern names
-        suggested_patterns = [p.strip() for p in response.split(',')]
-        valid_patterns = [p for p in suggested_patterns if p in self._pattern_map]
+            # Cache the result (persists across calls)
+            if valid_patterns:
+                self._topic_grammar_cache[topic_lower] = valid_patterns
 
-        # Cache the result (persists across calls)
-        if valid_patterns:
-            self._topic_grammar_cache[topic_lower] = valid_patterns
+            return valid_patterns[:5]  # Top 5 most relevant
 
-        return valid_patterns[:5]  # Top 5 most relevant
-
-    except Exception:
-        # Fallback to empty list on error
-        return []
+        except Exception:
+            # Fallback to empty list on error
+            return []
 ```
 
 #### 4.2 Teaching Triggers
@@ -934,8 +971,10 @@ def _get_teaching_triggers(self, context: Dict) -> List[Dict]:
 
 ---
 
-### Phase 5: Dynamic Curriculum (2 hours)
-**Goal**: Make smart decisions about when to teach
+### Phase 5: Teaching Timing & Natural Integration (2 hours)
+**Goal**: Refine WHEN to teach with sophisticated timing and flow awareness
+
+**TIMING FOCUS**: This phase adds sophisticated teaching timing logic - when to interrupt flow, how to handle different priority levels, and ensuring grammar teaching feels natural in conversation. Builds on Phase 4's foundation.
 
 #### 5.1 Teaching Timing Model
 ```python
@@ -1294,11 +1333,20 @@ Return ONLY valid JSON in this format:
 - [ ] Document effectiveness measurement limitations
 - [ ] Test learning and adaptation with persistence restarts
 
-### Phase 4: Context Awareness (2 hours)
-- [ ] Implement `should_proactively_teach()`
+### Phase 3: Adaptive Curriculum (2 hours) ✅ COMPLETED
+- [x] PatternDependency system with prerequisites, enables, difficulty_impact
+- [x] `get_adaptive_curriculum_order()` - personalized curriculum sequencing
+- [x] `_reorder_for_reinforcement()` - move weak patterns earlier for practice
+- [x] `_reorder_for_acceleration()` - move dependent patterns earlier when prerequisites mastered
+- [x] `_validate_dependencies()` - ensure prerequisite relationships satisfied
+- [x] Integration methods: `should_use_adaptive_curriculum()`, `get_recommended_next_pattern()`
+
+### Phase 4: Teaching Timing (2 hours)
+- [ ] Implement `should_proactively_teach()` - topic-based proactive teaching
 - [ ] Create topic-to-grammar mapping with class-level cache
-- [ ] Implement `_get_teaching_triggers()`
-- [ ] Implement `_get_patterns_due_for_review()`
+- [ ] Implement `_get_grammar_for_topic()` - map conversation topics to required patterns
+- [ ] Implement `_get_teaching_triggers()` - identify immediate teaching opportunities
+- [ ] Implement `_get_patterns_due_for_review()` - spaced repetition scheduling
 
 ### Testing & Integration (2 hours)
 - [ ] Write unit tests for new methods
@@ -1632,11 +1680,16 @@ After completing this upgrade, you'll understand:
 1. Add LLM decision-making (Phase 1)
 2. Test and refine prompts
 3. Add learning system (Phase 2)
-4. Add proactive teaching (Phase 3)
-5. Add context awareness (Phase 4)
-6. Add dynamic curriculum (Phase 5)
+4. Add adaptive curriculum management (Phase 3) - Strategic sequencing
+5. Add context-aware teaching timing (Phase 4) - Tactical decisions
+6. Add sophisticated timing refinement (Phase 5) - Advanced flow
 
-**Note**: Phase 5 (Dynamic Curriculum) comes last because it requires a working `LearnerGrammarProfile` from Phase 2 to make intelligent reordering decisions.
+**Note**: Phases 3, 4, and 5 form a progression:
+- Phase 3: Strategic curriculum design (WHAT order to teach)
+- Phase 4: Tactical teaching decisions (WHEN to teach in conversation)
+- Phase 5: Sophisticated timing and flow (HOW to teach naturally)
+
+This progression moves from long-term curriculum planning → real-time decision making → refined conversation integration.
 
 ### Test Each Phase
 Before moving to next phase, ensure:
@@ -1666,9 +1719,9 @@ Before moving to next phase, ensure:
 **Phase breakdown** (implementation order: 1→2→3→4→5):
 - Phase 1 (Foundation): 2 hours
 - Phase 2 (Learning): 5 hours (increased for integration testing)
-- Phase 3 (Proactive Teaching): 2 hours
-- Phase 4 (Context Awareness): 2 hours
-- Phase 5 (Dynamic Curriculum): 2 hours
+- Phase 3 (Adaptive Curriculum): 2 hours - Strategic curriculum sequencing
+- Phase 4 (Teaching Timing): 2 hours - Tactical teaching decisions
+- Phase 5 (Timing Refinement): 2 hours - Advanced flow & timing
 - Testing & Integration: 2 hours
 - **Total**: 15 hours + 1 hour buffer = 16 hours
 

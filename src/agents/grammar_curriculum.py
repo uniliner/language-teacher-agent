@@ -20,6 +20,21 @@ from models.learner import ConfidenceLevel
 
 
 @dataclass
+class PatternDependency:
+    """
+    Define relationships between grammar patterns.
+
+    Example:
+    - "accusative_case" requires "definite_articles_nominative"
+    - "subordinate_clause_verb_final" requires "sv_order_main_clause"
+    """
+    pattern: str
+    requires: List[str]  # prerequisites
+    enables: List[str]  # patterns this unlocks
+    difficulty_impact: float  # how much harder patterns become if this not mastered
+
+
+@dataclass
 class CurriculumPattern:
     """A grammar pattern in the curriculum."""
     name: str  # Pattern identifier (e.g., "present_regular")
@@ -232,6 +247,149 @@ class GrammarCurriculumAgent(Agent):
             description="Future tense with 'werden' + infinitive"
         ),
     ]
+
+    # Build dependency graph for German grammar
+    # This defines which patterns are prerequisites for others
+    PATTERN_DEPENDENCIES: Dict[str, PatternDependency] = {
+        "sv_order_main_clause": PatternDependency(
+            pattern="sv_order_main_clause",
+            requires=[],
+            enables=["subordinate_clause_verb_final", "question_word_order"],
+            difficulty_impact=0.8,
+        ),
+        "definite_articles_nominative": PatternDependency(
+            pattern="definite_articles_nominative",
+            requires=[],
+            enables=["accusative_case", "dative_case", "adjective_endings_basic"],
+            difficulty_impact=0.9,
+        ),
+        "noun_gender": PatternDependency(
+            pattern="noun_gender",
+            requires=[],
+            enables=["adjective_endings_basic", "adjective_endings_all"],
+            difficulty_impact=0.7,
+        ),
+        "accusative_case": PatternDependency(
+            pattern="accusative_case",
+            requires=["definite_articles_nominative"],
+            enables=["dative_case", "two_way_prepositions"],
+            difficulty_impact=0.8,
+        ),
+        "present_tense_regular": PatternDependency(
+            pattern="present_tense_regular",
+            requires=[],
+            enables=["perfect_tense_haben", "modal_verbs_present", "future_tense"],
+            difficulty_impact=0.9,
+        ),
+        "separable_verbs_basic": PatternDependency(
+            pattern="separable_verbs_basic",
+            requires=["present_tense_regular"],
+            enables=["separable_verbs_in_clauses"],
+            difficulty_impact=0.6,
+        ),
+        "question_word_order": PatternDependency(
+            pattern="question_word_order",
+            requires=["sv_order_main_clause"],
+            enables=[],
+            difficulty_impact=0.3,
+        ),
+        "indefinite_articles_nominative": PatternDependency(
+            pattern="indefinite_articles_nominative",
+            requires=["definite_articles_nominative"],
+            enables=[],
+            difficulty_impact=0.2,
+        ),
+        "perfect_tense_haben": PatternDependency(
+            pattern="perfect_tense_haben",
+            requires=["present_tense_regular"],
+            enables=["perfect_tense_sein", "passive_present"],
+            difficulty_impact=0.7,
+        ),
+        "dative_case": PatternDependency(
+            pattern="dative_case",
+            requires=["definite_articles_nominative", "accusative_case"],
+            enables=["genitive_case", "two_way_prepositions"],
+            difficulty_impact=0.8,
+        ),
+        "prepositions_accusative": PatternDependency(
+            pattern="prepositions_accusative",
+            requires=["accusative_case"],
+            enables=["two_way_prepositions"],
+            difficulty_impact=0.6,
+        ),
+        "modal_verbs_present": PatternDependency(
+            pattern="modal_verbs_present",
+            requires=["present_tense_regular"],
+            enables=[],
+            difficulty_impact=0.5,
+        ),
+        "subordinate_clause_verb_final": PatternDependency(
+            pattern="subordinate_clause_verb_final",
+            requires=["sv_order_main_clause"],
+            enables=["relative_clauses", "separable_verbs_in_clauses"],
+            difficulty_impact=0.9,
+        ),
+        "adjective_endings_basic": PatternDependency(
+            pattern="adjective_endings_basic",
+            requires=["definite_articles_nominative", "noun_gender"],
+            enables=["adjective_endings_all"],
+            difficulty_impact=0.7,
+        ),
+        "prepositions_dative": PatternDependency(
+            pattern="prepositions_dative",
+            requires=["dative_case"],
+            enables=["two_way_prepositions"],
+            difficulty_impact=0.6,
+        ),
+        "two_way_prepositions": PatternDependency(
+            pattern="two_way_prepositions",
+            requires=["accusative_case", "dative_case"],
+            enables=[],
+            difficulty_impact=0.8,
+        ),
+        "perfect_tense_sein": PatternDependency(
+            pattern="perfect_tense_sein",
+            requires=["perfect_tense_haben"],
+            enables=[],
+            difficulty_impact=0.5,
+        ),
+        "genitive_case": PatternDependency(
+            pattern="genitive_case",
+            requires=["dative_case"],
+            enables=[],
+            difficulty_impact=0.6,
+        ),
+        "passive_present": PatternDependency(
+            pattern="passive_present",
+            requires=["perfect_tense_haben"],
+            enables=[],
+            difficulty_impact=0.7,
+        ),
+        "relative_clauses": PatternDependency(
+            pattern="relative_clauses",
+            requires=["subordinate_clause_verb_final"],
+            enables=[],
+            difficulty_impact=0.8,
+        ),
+        "adjective_endings_all": PatternDependency(
+            pattern="adjective_endings_all",
+            requires=["adjective_endings_basic"],
+            enables=[],
+            difficulty_impact=0.9,
+        ),
+        "separable_verbs_in_clauses": PatternDependency(
+            pattern="separable_verbs_in_clauses",
+            requires=["separable_verbs_basic", "subordinate_clause_verb_final"],
+            enables=[],
+            difficulty_impact=0.7,
+        ),
+        "future_tense": PatternDependency(
+            pattern="future_tense",
+            requires=["present_tense_regular"],
+            enables=[],
+            difficulty_impact=0.6,
+        ),
+    }
 
     @classmethod
     def get_valid_pattern_names(cls) -> List[str]:
@@ -946,6 +1104,323 @@ If action is "wait", set pattern to "null" and teaching_approach to "none"."""
             return pattern.category.value
         return "general"
 
+    def get_adaptive_curriculum_order(self, learner) -> List[str]:
+        """
+        Generate personalized curriculum order based on learner needs.
+
+        Algorithm:
+        1. Start with base A1 → B1 sequence
+        2. Identify learner's weak areas
+        3. Move THOSE weak patterns earlier (for reinforcement practice)
+        4. Identify learner's strengths
+        5. Move DEPENDENT/ADVANCED patterns earlier (accelerate past mastered prerequisites)
+        6. Respect prerequisites
+        7. Maximize learning efficiency
+
+        KEY DISTINCTION:
+        - Weak areas: Move the weak patterns themselves earlier (e.g., basic case patterns from positions 15,25 → 8,18)
+        - Strong areas: Move patterns that DEPEND on strengths earlier (e.g., if strong in "basic verbs", move "advanced verb tenses" from position 30 → 20)
+        - Result: Weak fundamentals get front-loaded practice; strong fundamentals unlock advanced content faster
+
+        Args:
+            learner: The learner object
+
+        Returns:
+            List of pattern names in adaptive order
+        """
+        base_order = [p.name for p in self.GERMAN_GRAMMAR_CURRICULUM]
+
+        # Get learner profile
+        weaknesses = self.learner_profile.error_prone_patterns
+        strengths = self.learner_profile.strength_patterns
+
+        # Reorder based on needs
+        adaptive_order = self._reorder_for_reinforcement(
+            base_order, weaknesses
+        )
+        adaptive_order = self._reorder_for_acceleration(
+            adaptive_order, strengths
+        )
+
+        # Validate prerequisites still satisfied
+        adaptive_order = self._validate_dependencies(adaptive_order)
+
+        return adaptive_order
+
+    def should_use_adaptive_curriculum(self) -> bool:
+        """
+        Determine if adaptive curriculum should be used based on learner profile.
+
+        Adaptive curriculum is beneficial when:
+        - Learner has identified weaknesses (error-prone patterns)
+        - Learner has identified strengths (strength patterns)
+        - Enough interaction data has been collected
+
+        Returns:
+            True if adaptive curriculum should be used, False otherwise
+        """
+        # Need sufficient data for adaptive curriculum to be meaningful
+        has_weaknesses = len(self.learner_profile.error_prone_patterns) > 0
+        has_strengths = len(self.learner_profile.strength_patterns) > 0
+
+        # Check if we have enough interaction data
+        total_patterns = len(self.learner.grammar_patterns)
+        has_sufficient_data = total_patterns >= 5  # At least 5 patterns attempted
+
+        return has_sufficient_data and (has_weaknesses or has_strengths)
+
+    def get_recommended_next_pattern(self) -> Optional[str]:
+        """
+        Get the recommended next pattern, automatically choosing between
+        static and adaptive curriculum based on learner profile.
+
+        This is the recommended method for getting the next pattern as it
+        intelligently decides whether to use adaptive curriculum based on:
+        - Amount of learner data collected
+        - Presence of identified weaknesses/strengths
+        - Learner's current progress
+
+        Returns:
+            Name of the next pattern to focus on, or None if all patterns mastered
+        """
+        use_adaptive = self.should_use_adaptive_curriculum()
+        return self.get_next_pattern(use_adaptive=use_adaptive)
+
+    def _reorder_for_reinforcement(
+        self,
+        order: List[str],
+        weaknesses: List[str]
+    ) -> List[str]:
+        """
+        Move the weak patterns THEMSELVES earlier for extra practice.
+
+        EXAMPLE: If learner struggles with "accusative_case" (weakness):
+        - Before: accusative_case at position 15
+        - After: accusative_case at position 8 (earlier for more practice)
+
+        CONTRAST with _reorder_for_acceleration:
+        - Reinforcement: Move the WEAK pattern earlier (the pattern itself)
+        - Acceleration: Move DEPENDENT patterns earlier (what comes after strengths)
+
+        If learner struggles with "case", move all case patterns earlier
+        and add more spacing between them for practice.
+
+        IMPLEMENTATION: Rule-based category prioritization
+
+        ALGORITHM:
+        1. Extract categories from weaknesses (e.g., "accusative_case" → "case")
+        2. Find all patterns in weak categories
+        3. Group them by category
+        4. Move each weak category earlier in sequence
+        5. Insert review patterns between weak category patterns
+
+        Args:
+            order: Current curriculum order
+            weaknesses: List of pattern names the learner struggles with
+
+        Returns:
+            Reordered list with weak patterns moved earlier
+        """
+        if not weaknesses:
+            return order
+
+        # Step 1: Extract weak categories from pattern names
+        weak_categories = set()
+        for pattern_name in weaknesses:
+            category = self._get_pattern_category(pattern_name)
+            weak_categories.add(category)
+
+        # Step 2: Find all patterns in weak categories
+        weak_category_patterns = {cat: [] for cat in weak_categories}
+        other_patterns = []
+
+        for pattern_name in order:
+            pattern = self._pattern_map.get(pattern_name)
+            if pattern and pattern.category.value in weak_categories:
+                weak_category_patterns[pattern.category.value].append(pattern_name)
+            else:
+                other_patterns.append(pattern_name)
+
+        # Step 3: Build new order with weak categories first
+        new_order = []
+
+        # Add weak category patterns early (with spacing for review)
+        for category, patterns in weak_category_patterns.items():
+            # Move this category's patterns to front
+            for pattern_name in patterns:
+                new_order.append(pattern_name)
+                # Add spacing pattern after every weak category pattern
+                # This allows for practice and reinforcement
+                if len(new_order) % 3 == 0:  # Every 3rd position
+                    # Add a brief review/work pattern from other categories
+                    if other_patterns:
+                        new_order.append(other_patterns.pop(0))
+
+        # Add remaining patterns
+        new_order.extend(other_patterns)
+
+        return new_order
+
+    def _reorder_for_acceleration(
+        self,
+        order: List[str],
+        strengths: List[str]
+    ) -> List[str]:
+        """
+        Move DEPENDENT patterns earlier when learner has strong fundamentals.
+
+        EXAMPLE: If learner is strong in "present_tense_regular" (strength):
+        - Before: perfect_tense at position 15 (requires present_tense_regular at position 2)
+        - After: perfect_tense at position 8 (accelerated because prerequisite is mastered)
+
+        CONTRAST with _reorder_for_reinforcement:
+        - Reinforcement: Move the WEAK pattern earlier (the pattern itself)
+        - Acceleration: Move DEPENDENT patterns earlier (what comes after strengths)
+
+        IMPLEMENTATION: Check prerequisite satisfaction
+
+        ALGORITHM:
+        1. For each strength, find what patterns it enables (via PATTERN_DEPENDENCIES)
+        2. Check if those enabled patterns can be moved earlier
+        3. Move them earlier if their prerequisites are met
+        4. Preserve relative order among accelerated patterns
+
+        Args:
+            order: Current curriculum order
+            strengths: List of pattern names the learner is strong in
+
+        Returns:
+            Reordered list with dependent patterns moved earlier
+        """
+        if not strengths:
+            return order
+
+        # Step 1: Find patterns that can be accelerated
+        # (their prerequisites are all in strengths)
+        accelerated_patterns = []
+        other_patterns = []
+
+        for pattern_name in order:
+            # Skip if already in strengths (we're looking for dependent patterns)
+            if pattern_name in strengths:
+                other_patterns.append(pattern_name)
+                continue
+
+            # Check if this pattern's prerequisites are all mastered
+            dependency = self.PATTERN_DEPENDENCIES.get(pattern_name)
+            if not dependency or not dependency.requires:
+                # No dependencies or not in our dependency graph
+                other_patterns.append(pattern_name)
+                continue
+
+            # Check if all prerequisites are in strengths
+            prerequisites_met = all(
+                prereq in strengths for prereq in dependency.requires
+            )
+
+            if prerequisites_met:
+                # This pattern can be accelerated!
+                accelerated_patterns.append(pattern_name)
+            else:
+                other_patterns.append(pattern_name)
+
+        # Step 2: Build new order with accelerated patterns moved earlier
+        # Insert accelerated patterns after their prerequisites but before they would normally appear
+        new_order = []
+        accelerated_inserted = set()
+
+        for pattern_name in order:
+            # Add pattern to new order
+            if pattern_name in other_patterns and pattern_name not in accelerated_inserted:
+                new_order.append(pattern_name)
+
+            # Check if we should insert any accelerated patterns here
+            # (after their prerequisites)
+            for accelerated_pattern in accelerated_patterns:
+                if accelerated_pattern in accelerated_inserted:
+                    continue
+
+                dependency = self.PATTERN_DEPENDENCIES.get(accelerated_pattern)
+                if dependency and dependency.requires:
+                    # Check if all prerequisites have been added
+                    if all(prereq in new_order for prereq in dependency.requires):
+                        # Insert this accelerated pattern here
+                        new_order.append(accelerated_pattern)
+                        accelerated_inserted.add(accelerated_pattern)
+
+        # Add any remaining accelerated patterns that weren't inserted
+        for pattern_name in accelerated_patterns:
+            if pattern_name not in accelerated_inserted:
+                new_order.append(pattern_name)
+
+        return new_order
+
+    def _validate_dependencies(self, order: List[str]) -> List[str]:
+        """
+        Validate that prerequisites are satisfied in the given order.
+
+        Ensures that for every pattern in the order, all its prerequisites
+        appear before it.
+
+        IMPLEMENTATION: Dependency validation
+
+        ALGORITHM:
+        1. Track which patterns have been seen
+        2. For each pattern, check if its prerequisites are in the seen set
+        3. If not, move the pattern after its prerequisites
+        4. Return validated order
+
+        Args:
+            order: Proposed curriculum order
+
+        Returns:
+            Validated order with all prerequisites satisfied
+        """
+        validated_order = []
+        seen_patterns = set()
+
+        # May need multiple passes to resolve all dependencies
+        max_iterations = len(order) * 2  # Prevent infinite loops
+        iteration = 0
+
+        while len(validated_order) < len(order) and iteration < max_iterations:
+            iteration += 1
+            progress_made = False
+
+            for pattern_name in order:
+                if pattern_name in validated_order:
+                    continue
+
+                # Check if this pattern has dependencies
+                dependency = self.PATTERN_DEPENDENCIES.get(pattern_name)
+
+                if not dependency or not dependency.requires:
+                    # No dependencies, can add immediately
+                    validated_order.append(pattern_name)
+                    seen_patterns.add(pattern_name)
+                    progress_made = True
+                else:
+                    # Check if all prerequisites are satisfied
+                    prerequisites_met = all(
+                        prereq in seen_patterns for prereq in dependency.requires
+                    )
+
+                    if prerequisites_met:
+                        validated_order.append(pattern_name)
+                        seen_patterns.add(pattern_name)
+                        progress_made = True
+
+            if not progress_made:
+                # No progress made - likely circular dependency or missing prerequisite
+                # Add remaining patterns in their original order
+                for pattern_name in order:
+                    if pattern_name not in validated_order:
+                        validated_order.append(pattern_name)
+                        seen_patterns.add(pattern_name)
+                break
+
+        return validated_order
+
     def _detect_learning_style(self, context: Dict) -> None:
         """
         Detect learner's grammar learning style using LLM analysis.
@@ -1073,6 +1548,12 @@ Learning styles:
             "adapt teaching approach based on learner profile",
             "detect learner's grammar learning style (analytical/visual/immersion)",
             "remember teaching insights across sessions (persistence)",
+            # Phase 3: Proactive Teaching capabilities
+            "teach grammar before errors occur (predictive teaching)",
+            "generate personalized curriculum order based on learner needs",
+            "reinforce weak patterns by moving them earlier in curriculum",
+            "accelerate learning by introducing advanced patterns when prerequisites mastered",
+            "respect pattern dependencies and prerequisites",
         ]
 
     def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -1274,40 +1755,65 @@ Learning styles:
             "progress_percent": round(mastered_count / max(total_level_patterns, 1) * 100, 1),
         }
 
-    def get_next_pattern(self) -> Optional[str]:
+    def get_next_pattern(self, use_adaptive: bool = False) -> Optional[str]:
         """
         Get the next pattern the learner should focus on.
 
         Returns the next GrammarPattern from the curriculum that the learner
         has not yet mastered, respecting the learner's current CEFR level.
 
+        Args:
+            use_adaptive: If True, use personalized adaptive curriculum order.
+                        If False (default), use standard sequential curriculum.
+                        Adaptive curriculum requires learner profile data from Phase 2.
+
         Returns:
             Name of the next pattern to focus on, or None if all appropriate patterns mastered
         """
-        learner_level = self.learner.current_cefr_level
+        # Choose curriculum order based on parameter
+        if use_adaptive:
+            # Use adaptive curriculum (Phase 3: Proactive Teaching)
+            # This requires learner profile with weaknesses/strengths from Phase 2
+            if self.learner_profile.error_prone_patterns or self.learner_profile.strength_patterns:
+                curriculum_order = self.get_adaptive_curriculum_order(self.learner)
+                print(f"[GrammarCurriculum] Using adaptive curriculum order (reordered based on learner profile)")
+            else:
+                # Fall back to static curriculum if no profile data yet
+                curriculum_order = [p.name for p in self.GERMAN_GRAMMAR_CURRICULUM]
+                print(f"[GrammarCurriculum] No learner profile data yet, using static curriculum")
+        else:
+            # Use standard sequential curriculum (original behavior)
+            curriculum_order = [p.name for p in self.GERMAN_GRAMMAR_CURRICULUM]
 
-        # Determine which levels are accessible
+        # Filter by learner's CEFR level
+        learner_level = self.learner.current_cefr_level
         level_order = ["A1", "A2", "B1"]
-        accessible_levels = []
+        accessible_levels = set()
 
         for level in level_order:
-            accessible_levels.append(level)
+            accessible_levels.add(level)
             if level == learner_level:
                 break
 
-        # Search through accessible levels for next pattern
-        for level in accessible_levels:
-            patterns_at_level = self._patterns_by_level.get(level, [])
+        # Search through curriculum order for next unmastered pattern
+        for pattern_name in curriculum_order:
+            # Check if pattern is accessible at learner's level
+            pattern = self._pattern_map.get(pattern_name)
+            if not pattern:
+                continue
 
-            for pattern in patterns_at_level:
-                learner_pattern = self.learner.grammar_patterns.get(pattern.name)
+            if pattern.introduced_at_level not in accessible_levels:
+                continue
 
-                # If pattern doesn't exist or isn't mastered, it's a candidate
-                if learner_pattern is None:
-                    return pattern.name
+            # Check if learner has mastered this pattern
+            learner_pattern = self.learner.grammar_patterns.get(pattern_name)
 
-                if learner_pattern.mastery_score < 0.7:
-                    return pattern.name
+            # If pattern doesn't exist or isn't mastered, it's a candidate
+            if learner_pattern is None:
+                return pattern_name
+
+            if learner_pattern.mastery_score < 0.7:
+                return pattern_name
 
         # All patterns at accessible levels are mastered
         return None
