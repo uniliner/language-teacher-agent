@@ -654,13 +654,13 @@ If action is "wait", set pattern to "null" and teaching_approach to "none"."""
         """
         Fallback: Rule-based decision when LLM fails.
 
-        STRATEGY: Use highest-priority teaching trigger directly
+        STRATEGY: Use teaching triggers with Phase 4 timing evaluation
 
         Args:
             context: Teaching context from _build_teaching_context()
 
         Returns:
-            Rule-based teaching decision
+            Rule-based teaching decision with timing awareness
         """
         triggers = self._get_teaching_triggers(context)
 
@@ -674,16 +674,27 @@ If action is "wait", set pattern to "null" and teaching_approach to "none"."""
                 "priority": 0.0,
             }
 
-        # Use highest-priority trigger
-        top_trigger = triggers[0]
+        # Evaluate triggers in priority order until we find one that's suitable NOW
+        for trigger in triggers:
+            # Phase 4: Check if THIS is the right moment to teach
+            if self.should_teach_now(trigger, context):
+                return {
+                    "action": self._map_trigger_type_to_action(trigger["type"]),
+                    "pattern": trigger["pattern"],
+                    "reasoning": f"Rule-based: {trigger['type']} ({trigger.get('reason', 'Priority: {:.1f}'.format(trigger['priority']))})",
+                    "teaching_approach": "explicit_explanation",  # Default for fallback
+                    "examples_needed": True,
+                    "priority": trigger["priority"],
+                }
 
+        # No suitable teaching moment found - timing matters!
         return {
-            "action": self._map_trigger_type_to_action(top_trigger["type"]),
-            "pattern": top_trigger["pattern"],
-            "reasoning": f"Rule-based fallback: {top_trigger['type']}",
-            "teaching_approach": "explicit_explanation",  # Default for fallback
-            "examples_needed": True,
-            "priority": top_trigger["priority"],
+            "action": "wait",
+            "pattern": None,
+            "reasoning": "Teaching triggers found but NOW is not the right moment (timing evaluation)",
+            "teaching_approach": "none",
+            "examples_needed": False,
+            "priority": 0.0,
         }
 
     def _map_trigger_type_to_action(self, trigger_type: str) -> str:
@@ -700,6 +711,10 @@ If action is "wait", set pattern to "null" and teaching_approach to "none"."""
             "review_due": "review_pattern",
             "recurring_error": "reinforce_pattern",
             "prerequisite_ready": "introduce_pattern",
+            # Phase 4: Topic-based triggers
+            "topic_relevant_introduction": "introduce_pattern",
+            "topic_relevant_review": "review_pattern",
+            "topic_relevant": "introduce_pattern",  # Default for topic triggers
         }
         return mapping.get(trigger_type, "wait")
 
@@ -746,10 +761,252 @@ If action is "wait", set pattern to "null" and teaching_approach to "none"."""
                 "priority": 0.7,
             })
 
+        # 4. Topic-relevant grammar (Phase 4: Context-Aware Teaching)
+        context_triggers = self.should_proactively_teach(context)
+        if context_triggers:
+            # Map action to trigger type
+            action_to_trigger_type = {
+                "introduce_pattern": "topic_relevant_introduction",
+                "review_pattern": "topic_relevant_review",
+            }
+            triggers.append({
+                "type": action_to_trigger_type.get(context_triggers["action"], "topic_relevant"),
+                "pattern": context_triggers["pattern"],
+                "priority": context_triggers.get("priority", 0.6),
+                "reason": context_triggers.get("reason", ""),
+            })
+
         # Sort by priority
         triggers.sort(key=lambda t: t["priority"], reverse=True)
 
         return triggers
+
+    def should_teach_now(self, trigger: Dict, context: Dict) -> bool:
+        """
+        Strategic decision: Is THIS the right moment to teach?
+
+        This is the core Phase 4 timing logic that determines whether to interrupt
+        conversation flow for grammar teaching. It considers multiple factors with
+        priority-based overrides to balance pedagogical effectiveness with
+        natural conversation flow.
+
+        Args:
+            trigger: Teaching trigger with 'pattern', 'priority', and optional 'reason'
+            context: Teaching context containing flow, confidence, recent turns
+
+        Returns:
+            True if teaching should proceed, False otherwise
+
+        IMPLEMENTATION: Layered decision making with early exits
+
+        ALGORITHM:
+        1. Check hard constraints (flow, confidence) - return False if fail
+        2. Check timing constraints (frequency) - return False if too soon
+        3. For high-priority triggers: use relaxed thresholds
+        4. For normal-priority triggers: use standard thresholds
+        5. Check learner receptiveness and natural fit
+        """
+        flow_score = context.get("flow_score", 0.5)
+        confidence = context.get("confidence", ConfidenceLevel.MODERATE)
+        priority = trigger.get("priority", 0.5)
+
+        # Hard constraint: Don't overwhelm VERY_LOW confidence learners
+        # (Cannot be overridden even by high priority)
+        if confidence == ConfidenceLevel.VERY_LOW:
+            return False
+
+        # Hard constraint: Don't teach if flow is extremely poor (< 0.3)
+        # (Cannot be overridden - conversation is struggling)
+        if flow_score < 0.3:
+            return False
+
+        # High-priority triggers (review due, recurring errors) get relaxed thresholds
+        if priority >= 0.9:
+            # Can proceed with flow >= 0.3 (already checked above)
+
+            # **TEACHING FREQUENCY BYPASS** (design decision, not a bug):
+            # Spaced-repetition reviews and recurring error corrections are TIME-SENSITIVE.
+            # They bypass the 10-turn frequency check because:
+            # 1. Reviews are scheduled based on memory decay (not arbitrary frequency)
+            # 2. Recurring errors indicate forming bad habits (urgent correction needed)
+            # 3. Waiting risks fossilizing errors or missing review windows
+            # This is pedagogically sound and intentional behavior.
+            pass
+        else:
+            # Standard-priority triggers need better flow
+            if flow_score < 0.5:  # Standard threshold
+                return False
+
+            # Check teaching frequency (don't teach too often)
+            # Get turns_since_last_grammar from either direct context or conversation sub-context
+            turns_since_grammar = context.get("turns_since_last_grammar",
+                                              context.get("conversation", {}).get("turns_since_last_grammar", 0))
+            if turns_since_grammar < 10:
+                return False
+
+        # Check if learner is receptive
+        if not self._is_learner_receptive(context):
+            return False
+
+        # Check if this fits naturally in conversation
+        if not self._fits_conversation_naturally(trigger, context):
+            return False
+
+        return True
+
+    def _is_learner_receptive(self, context: Dict) -> bool:
+        """
+        Is the learner in a good state to learn grammar?
+
+        Signs of receptiveness:
+        - Asking questions
+        - Recent successful turns
+        - Not showing frustration
+        - Making attempt to use grammar
+
+        Args:
+            context: Teaching context with recent turns and conversation history
+
+        Returns:
+            True if learner appears receptive to grammar teaching
+
+        IMPLEMENTATION: Rule-based signal detection with aggregate scoring
+
+        ALGORITHM:
+        1. Check recent learner inputs for questions (contains '?')
+        2. Check recent success rate (errors in last 5 turns)
+        3. Check for frustration signals (repeated errors, short responses)
+        4. Check for grammar attempts (engagement despite errors)
+        5. Calculate aggregate receptiveness score (range: -2 to +4)
+        6. Return True if score >= threshold (1.0)
+
+        KEY CHANGE: Frustration signals can now override positive signals.
+        Previous early-exit pattern prevented this - now using aggregate scoring.
+        """
+        recent_turns = context.get("recent_turns", [])
+        if len(recent_turns) < 3:
+            return True  # Not enough data, assume receptive
+
+        receptiveness_score = 0.0
+
+        # Signal 1: Asking questions (strong positive: +2)
+        question_count = sum(1 for turn in recent_turns[-5:] if '?' in turn.get("learner_input", ""))
+        if question_count >= 1:
+            receptiveness_score += 2.0  # Learner is engaged!
+
+        # Signal 2: Recent success rate (positive: +1)
+        recent_errors = sum(turn.get("error_count", 0) for turn in recent_turns[-5:])
+        if recent_errors == 0:
+            receptiveness_score += 1.0  # Doing well, ready for new material
+
+        # Signal 3: Frustration detection (strong negative: -2)
+        avg_response_length = sum(len(turn.get("learner_input", "")) for turn in recent_turns[-5:]) / 5
+        if avg_response_length < 10:  # Very short responses
+            if recent_errors > 3:
+                receptiveness_score -= 2.0  # Likely frustrated
+
+        # Signal 4: Attempting grammar (positive: +1)
+        grammar_attempts = sum(1 for turn in recent_turns[-3:] if turn.get("error_count", 0) > 0)
+        if grammar_attempts >= 2 and recent_errors < 5:
+            receptiveness_score += 1.0  # Trying, but not overwhelmed
+
+        # Return True if aggregate score is positive
+        # Threshold of 1.0 means learner needs more positive than negative signals
+        return receptiveness_score >= 1.0
+
+    def _fits_conversation_naturally(self, trigger: Dict, context: Dict) -> bool:
+        """
+        Can this grammar be introduced naturally in current conversation?
+
+        Check:
+        - Does conversation topic relate?
+        - Did learner just use related grammar?
+        - Are there examples in recent context?
+
+        Args:
+            trigger: Teaching trigger with pattern information
+            context: Teaching context with conversation topic and recent patterns
+
+        Returns:
+            True if teaching fits naturally in conversation
+
+        PRIORITY BYPASS: High-priority triggers skip this check
+        - Review due (spaced repetition): Always teach, topic-independent
+        - Recurring errors: Always teach, topic-independent
+        - Lower-priority triggers: Require natural fit
+
+        RATIONALE: Reviews and recurring error corrections are time-sensitive
+        and shouldn't be suppressed just because the topic doesn't match.
+        """
+        priority = trigger.get("priority", 0.5)
+
+        # High-priority triggers bypass natural fit check
+        if priority >= 0.8:
+            return True  # Teach regardless of topic fit
+
+        topic = context.get("conversation", {}).get("topic", "")
+        if not topic:
+            return False
+
+        # Get topic-relevant patterns
+        topic_patterns = self._get_grammar_for_topic(topic)
+
+        if trigger["pattern"] in topic_patterns:
+            return True  # Natural fit!
+
+        # Check if learner just used related pattern
+        recent_patterns = self._get_recent_patterns_used(context)
+        trigger_category = self._get_pattern_category(trigger["pattern"])
+
+        for recent_pattern in recent_patterns:
+            if self._are_patterns_related(recent_pattern, trigger_category):
+                return True
+
+        return False
+
+    def _get_recent_patterns_used(self, context: Dict) -> List[str]:
+        """
+        Get list of grammar patterns used in recent conversation turns.
+
+        Args:
+            context: Teaching context with recent turns
+
+        Returns:
+            List of pattern names used recently
+        """
+        recent_turns = context.get("recent_turns", [])
+        patterns_used = []
+
+        for turn in recent_turns[-5:]:  # Last 5 turns
+            patterns = turn.get("grammar_patterns_used", [])
+            patterns_used.extend(patterns)
+
+        return list(set(patterns_used))  # Remove duplicates
+
+    def _are_patterns_related(self, pattern1: str, category2: str) -> bool:
+        """
+        Check if two grammar patterns are related.
+
+        Two patterns are related if they belong to the same category or
+        if one enables the other (based on dependencies).
+
+        Args:
+            pattern1: First pattern name
+            category2: Category of second pattern
+
+        Returns:
+            True if patterns are related
+        """
+        # Get category of first pattern
+        category1 = self._get_pattern_category(pattern1)
+
+        # Same category = related
+        if category1 == category2:
+            return True
+
+        # Check if patterns have enabling relationship
+        # This is a simplified version - full implementation would check PATTERN_DEPENDENCIES
+        return False
 
     def _get_patterns_due_for_review(self) -> List[str]:
         """
@@ -793,6 +1050,134 @@ If action is "wait", set pattern to "null" and teaching_approach to "none"."""
         # This is a simplified version - in full implementation,
         # would check actual prerequisite dependencies
         return self.get_next_pattern()
+
+    def _get_grammar_for_topic(self, topic: str) -> List[str]:
+        """
+        Get relevant grammar patterns for a conversation topic.
+
+        Uses a hybrid approach:
+        1. Check static cache first (common topics)
+        2. If not found, use LLM to determine relevant grammar
+        3. Cache LLM result for future use
+
+        Args:
+            topic: Conversation topic (e.g., "food", "daily routine")
+
+        Returns:
+            List of grammar pattern names relevant to this topic
+
+        Design Notes:
+            - Checks cache first to avoid redundant LLM calls
+            - Uses LLM to determine grammar patterns for unknown topics
+            - Caches empty results to prevent repeated LLM calls for topics with no grammar mapping
+            - Returns cached results (including empty lists) to prevent retry loops
+        """
+        # Check cache first (including failed lookups)
+        topic_lower = topic.lower().strip()
+        if topic_lower in self._topic_grammar_cache:
+            cached = self._topic_grammar_cache[topic_lower]
+            # Empty list sentinel means "we checked, no patterns found"
+            return cached if cached != [] else []
+
+        # LLM fallback for unknown topics
+        if self.llm_client is None:
+            return []  # No LLM available, return empty list
+
+        try:
+            prompt = f"""Given the conversation topic "{topic}", which German grammar patterns from this list are most relevant?
+
+Available patterns:
+{', '.join([p.name for p in self.GERMAN_GRAMMAR_CURRICULUM[:20]])}
+
+Return only the pattern names, separated by commas, most relevant first."""
+
+            response = self.llm_client.client.messages.create(
+                model="claude-3-haiku-20240307",
+                max_tokens=100,
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            # Parse response and return valid pattern names
+            response_text = response.content[0].text
+            suggested_patterns = [p.strip() for p in response_text.split(',')]
+            valid_patterns = [p for p in suggested_patterns if p in self._pattern_map]
+
+            # Cache the result (persists across calls)
+            if valid_patterns:
+                self._topic_grammar_cache[topic_lower] = valid_patterns
+            else:
+                # Cache empty result to prevent repeated LLM calls for topics with no grammar mapping
+                self._topic_grammar_cache[topic_lower] = []
+
+            return valid_patterns[:5]  # Top 5 most relevant
+
+        except Exception:
+            # Fallback to empty list on error
+            # Cache empty result to prevent retry loops
+            self._topic_grammar_cache[topic_lower] = []
+            return []
+
+    def should_proactively_teach(self, context: Dict) -> Optional[Dict]:
+        """
+        Decide if we should teach grammar before errors occur based on conversation topic.
+
+        This method implements topic-based proactive teaching by identifying patterns
+        that are relevant to the current conversation topic and checking if the learner
+        needs them introduced or reinforced.
+
+        Scenarios:
+        1. Topic introduces new grammar → teach pattern first
+        2. Topic uses grammar learner is weak in → review first
+        3. No grammar needs for topic → return None
+
+        Args:
+            context: Teaching context containing conversation topic and learner state
+
+        Returns:
+            Dict with teaching action if needed, None otherwise:
+            {
+                "action": "introduce_pattern" | "review_pattern",
+                "pattern": "pattern_name",
+                "reason": "Topic '{topic}' uses this grammar",
+                "timing": "before_topic",
+                "priority": 0.6  # Medium priority for topic-based teaching
+            }
+        """
+        conversation_topic = context.get("conversation", {}).get("topic", "")
+        if not conversation_topic:
+            return None
+
+        # Check if topic requires specific grammar
+        required_patterns = self._get_grammar_for_topic(conversation_topic)
+        if not required_patterns:
+            return None
+
+        # Check each required pattern
+        for pattern_name in required_patterns:
+            learner_pattern = self.learner.grammar_patterns.get(pattern_name)
+
+            # If not introduced, this is a good time!
+            if learner_pattern is None:
+                return {
+                    "action": "introduce_pattern",
+                    "pattern": pattern_name,
+                    "reason": f"Topic '{conversation_topic}' uses this grammar",
+                    "timing": "before_topic",
+                    "priority": 0.6,  # Medium priority
+                }
+
+            # If weak, review first
+            if learner_pattern.mastery_score < 0.6:
+                return {
+                    "action": "review_pattern",
+                    "pattern": pattern_name,
+                    "reason": f"Topic '{conversation_topic}' uses this grammar",
+                    "timing": "before_topic",
+                    "priority": 0.6,  # Medium priority
+                }
+
+        # No grammar teaching needed for this topic
+        return None
 
     def _load_teaching_state(self) -> None:
         """

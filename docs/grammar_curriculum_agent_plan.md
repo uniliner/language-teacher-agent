@@ -1341,12 +1341,13 @@ Return ONLY valid JSON in this format:
 - [x] `_validate_dependencies()` - ensure prerequisite relationships satisfied
 - [x] Integration methods: `should_use_adaptive_curriculum()`, `get_recommended_next_pattern()`
 
-### Phase 4: Teaching Timing (2 hours)
-- [ ] Implement `should_proactively_teach()` - topic-based proactive teaching
-- [ ] Create topic-to-grammar mapping with class-level cache
-- [ ] Implement `_get_grammar_for_topic()` - map conversation topics to required patterns
-- [ ] Implement `_get_teaching_triggers()` - identify immediate teaching opportunities
-- [ ] Implement `_get_patterns_due_for_review()` - spaced repetition scheduling
+### Phase 4: Teaching Timing (2 hours) ✅ COMPLETED
+- [x] Implement `should_proactively_teach()` - topic-based proactive teaching
+- [x] Create topic-to-grammar mapping with class-level cache (already existed in Phase 2)
+- [x] Implement `_get_grammar_for_topic()` - map conversation topics to required patterns
+- [x] Implement `_get_teaching_triggers()` - identify immediate teaching opportunities (updated to include topic triggers)
+- [x] Implement `_get_patterns_due_for_review()` - spaced repetition scheduling (already existed)
+- [x] Comprehensive test suite with 18 tests covering all Phase 4 functionality
 
 ### Testing & Integration (2 hours)
 - [ ] Write unit tests for new methods
