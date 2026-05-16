@@ -17,6 +17,25 @@ from .base import Agent, AgentConfig
 from models.grammar import GrammarWeakness
 from models.grammar_teaching import StrategyStats, LearnerGrammarProfile
 from models.learner import ConfidenceLevel
+from llm.grammar_prompts import (
+    TEACHING_DECISION_SYSTEM_PROMPT,
+    TEACHING_DECISION_USER_PROMPT_TEMPLATE,
+    TEACHING_APPROACH_SYSTEM_PROMPT,
+    TEACHING_APPROACH_USER_PROMPT_TEMPLATE,
+    LEARNER_PROFILING_SYSTEM_PROMPT,
+    LEARNER_PROFILING_USER_PROMPT_TEMPLATE,
+    TOPIC_GRAMMAR_SYSTEM_PROMPT,
+    TOPIC_GRAMMAR_USER_PROMPT_TEMPLATE,
+    TEACHING_DECISION_PARAMS,
+    TEACHING_APPROACH_PARAMS,
+    LEARNER_PROFILING_PARAMS,
+    TOPIC_GRAMMAR_PARAMS,
+    build_teaching_decision_prompt,
+    build_teaching_approach_prompt,
+    build_learner_profiling_prompt,
+    build_topic_grammar_prompt,
+    get_prompt_version,
+)
 
 
 @dataclass
@@ -449,6 +468,7 @@ class GrammarCurriculumAgent(Agent):
 
         # Phase 1: Teaching state (for learning and adaptation)
         # Track what works for THIS learner
+        # NOTE: Each agent instance has its own tracker (learner-specific)
         self.teaching_strategy_tracker: Dict[str, StrategyStats] = {}
         self.learner_profile = LearnerGrammarProfile()
 
@@ -462,6 +482,11 @@ class GrammarCurriculumAgent(Agent):
 
         # Teaching timing tracking
         self._last_grammar_teaching_turn: int = 0
+
+        #
+        # CONCURRENCY NOTE: teaching_strategy_tracker is instance-specific (per learner),
+        # unlike _topic_grammar_cache which is shared across all learners.
+        # This design avoids race conditions in multi-user scenarios for learner-specific data.
 
     def _build_level_index(self) -> Dict[str, List[CurriculumPattern]]:
         """Build an index of patterns by CEFR level."""
@@ -588,51 +613,31 @@ class GrammarCurriculumAgent(Agent):
 
         Returns:
             Structured teaching decision from LLM
+
+        Note: Uses centralized prompts from llm.grammar_prompts for versioning.
         """
         learner_state = context["learner_state"]
         conversation = context["conversation"]
 
-        prompt = f"""You are a pedagogical grammar expert. Decide what grammar teaching action to take.
-
-Learner State:
-- Level: {learner_state['cefr_level']}
-- Confidence: {learner_state['confidence']}
-- Recent errors: {learner_state['recent_errors']}
-- Mastered patterns: {list(learner_state['mastered_patterns'].keys())}
-- Current weaknesses: {learner_state['weaknesses']}
-
-Conversation Context:
-- Topic: {conversation['topic']}
-- Flow score: {conversation['flow_score']} (0.0 = struggling, 1.0 = flowing)
-- Recent learner input: {conversation['recent_input']}
-- Turns since last grammar teaching: {conversation['turns_since_last_grammar']}
-
-Available Actions:
-1. "introduce_pattern" - Teach a new grammar pattern
-2. "review_pattern" - Practice a pattern due for review
-3. "reinforce_pattern" - Strengthen a weak pattern
-4. "wait" - Don't interrupt conversation flow
-
-IMPORTANT: Return ONLY valid JSON in this exact format:
-{{
-    "action": "introduce_pattern" | "review_pattern" | "reinforce_pattern" | "wait",
-    "pattern": "pattern_name_or_null",
-    "reasoning": "Brief explanation of your decision",
-    "teaching_approach": "explicit_explanation" | "pattern_highlighting" | "guided_discovery" | "none",
-    "examples_needed": true | false,
-    "priority": 0.0 to 1.0
-}}
-
-If action is "wait", set pattern to "null" and teaching_approach to "none"."""
+        # Build user prompt using centralized template
+        user_prompt = TEACHING_DECISION_USER_PROMPT_TEMPLATE.format(
+            cefr_level=learner_state['cefr_level'],
+            confidence=learner_state['confidence'],
+            recent_errors=learner_state['recent_errors'],
+            mastered_patterns=list(learner_state['mastered_patterns'].keys()),
+            weaknesses=learner_state['weaknesses'],
+            topic=conversation['topic'],
+            flow_score=conversation['flow_score'],
+            learner_input=conversation['recent_input']
+        )
 
         if not self.llm_client:
             raise ValueError("LLM client not available")
 
         response = self.llm_client.generate_response(
-            system_prompt="You are a German grammar pedagogy expert. Always respond with valid JSON only, no additional text.",
-            user_message=prompt,
-            temperature=0.3,  # Lower temperature for more structured output
-            max_tokens=200,
+            system_prompt=TEACHING_DECISION_SYSTEM_PROMPT,
+            user_message=user_prompt,
+            **TEACHING_DECISION_PARAMS
         )
 
         # Parse JSON response
@@ -1108,6 +1113,8 @@ If action is "wait", set pattern to "null" and teaching_approach to "none"."""
             - Uses LLM to determine grammar patterns for unknown topics
             - Caches empty results to prevent repeated LLM calls for topics with no grammar mapping
             - Returns cached results (including empty lists) to prevent retry loops
+
+        Note: Uses centralized prompts from llm.grammar_prompts for versioning.
         """
         # Check cache first (including failed lookups)
         topic_lower = topic.lower().strip()
@@ -1121,17 +1128,19 @@ If action is "wait", set pattern to "null" and teaching_approach to "none"."""
             return []  # No LLM available, return empty list
 
         try:
-            prompt = f"""Given the conversation topic "{topic}", which German grammar patterns from this list are most relevant?
+            # Build prompt using centralized template
+            available_patterns = ', '.join([p.name for p in self.GERMAN_GRAMMAR_CURRICULUM[:20]])
+            system_prompt, user_prompt = build_topic_grammar_prompt(topic, available_patterns)
 
-Available patterns:
-{', '.join([p.name for p in self.GERMAN_GRAMMAR_CURRICULUM[:20]])}
-
-Return only the pattern names, separated by commas, most relevant first."""
-
+            # Use Haiku for fast, cheap topic-to-grammar mapping
+            # Direct API call to use specific model (not generate_response)
             response = self.llm_client.client.messages.create(
                 model="claude-3-haiku-20240307",
-                max_tokens=100,
-                messages=[{"role": "user", "content": prompt}]
+                max_tokens=TOPIC_GRAMMAR_PARAMS["max_tokens"],
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ]
             )
 
             # Parse response and return valid pattern names
@@ -1369,6 +1378,8 @@ Return only the pattern names, separated by commas, most relevant first."""
                 "practice_suggestion": str
             }
             Returns None if LLM is not available or generation fails.
+
+        Note: Uses centralized prompts from llm.grammar_prompts for versioning.
         """
         if not self.llm_client:
             print("[GrammarCurriculum] No LLM client available for teaching content generation")
@@ -1388,45 +1399,22 @@ Return only the pattern names, separated by commas, most relevant first."""
             # Check if learner has struggled with this pattern before
             past_struggles = pattern_name in self.learner_profile.error_prone_patterns
 
-            prompt = f"""You are generating a teaching approach for the German grammar pattern: {pattern_name}
-
-Pattern Details:
-- Category: {curriculum_pattern.category.value}
-- Difficulty: {curriculum_pattern.difficulty_level.value}
-- Description: {curriculum_pattern.description}
-
-Learner Profile:
-- Learning style: {learning_style}
-- Effective teaching methods: {', '.join(effective_methods)}
-- Past struggles with this pattern: {"Yes" if past_struggles else "No"}
-
-Teaching approach to use: {teaching_approach}
-
-Available teaching approaches:
-- explicit_explanation: Clear rules with examples (great for analytical learners)
-- pattern_highlighting: Show patterns visually (great for visual learners)
-- guided_discovery: Help learner figure it out themselves (great for immersion learners)
-
-Generate a teaching approach and return ONLY valid JSON in this format:
-{{
-    "strategy": "{teaching_approach}",
-    "explanation": "2-3 sentence explanation appropriate for {learning_style} learners",
-    "examples": ["German example with translation", "Another example", "Third example if needed"],
-    "practice_suggestion": "Simple exercise or question for learner to practice"
-}}
-
-IMPORTANT:
-- Examples must be in German with English translations
-- Explanation must match the learner's learning style ({learning_style})
-- Keep explanation concise (2-3 sentences max)
-- Practice suggestion should be actionable and specific
-"""
+            # Build prompt using centralized template
+            system_prompt, user_prompt = build_teaching_approach_prompt(
+                pattern_name=pattern_name,
+                category=curriculum_pattern.category.value,
+                difficulty=str(curriculum_pattern.difficulty_level),  # difficulty_level is int, not Enum
+                description=curriculum_pattern.description,
+                learning_style=learning_style,
+                effective_methods=effective_methods,
+                struggles=past_struggles,
+                teaching_approach=teaching_approach
+            )
 
             response = self.llm_client.generate_response(
-                system_prompt="You are a German language pedagogy expert specializing in grammar instruction. Always respond with valid JSON only, no additional text.",
-                user_message=prompt,
-                temperature=0.4,  # Slightly higher for creative examples
-                max_tokens=300,
+                system_prompt=system_prompt,
+                user_message=user_prompt,
+                **TEACHING_APPROACH_PARAMS
             )
 
             # Parse JSON response
@@ -1444,9 +1432,12 @@ IMPORTANT:
 
         except json.JSONDecodeError as e:
             print(f"[GrammarCurriculum] Failed to parse teaching content JSON: {e}")
+            print(f"[GrammarCurriculum] Response was: {response[:200] if 'response' in locals() else 'N/A'}...")
             return None
         except Exception as e:
+            import traceback
             print(f"[GrammarCurriculum] Teaching content generation failed: {e}")
+            print(f"[GrammarCurriculum] Traceback: {traceback.format_exc()}")
             return None
 
     def _introduce_pattern(self, pattern_name: str, teaching_plan: Dict, context: Dict) -> Dict[str, Any]:
@@ -1463,9 +1454,16 @@ IMPORTANT:
         Returns:
             Dict with execution status and generated content:
             {
-                "success": bool,
-                "teaching_content": Optional[Dict],
-                "message": str
+                "success": bool,  # True if pattern was introduced/refreshed
+                "teaching_content": Optional[Dict],  # LLM-generated content or None
+                "message": str  # Description of what happened
+            }
+            Where teaching_content (if present) contains:
+            {
+                "strategy": str,
+                "explanation": str,
+                "examples": List[str],
+                "practice_suggestion": str
             }
         """
         # Check if pattern exists in curriculum
@@ -1520,9 +1518,9 @@ IMPORTANT:
         Returns:
             Dict with execution status and generated content:
             {
-                "success": bool,
-                "teaching_content": Optional[Dict],
-                "message": str
+                "success": bool,  # True if pattern was reviewed successfully
+                "teaching_content": Optional[Dict],  # LLM-generated content or None
+                "message": str  # Description of what happened
             }
         """
         if pattern_name not in self.learner.grammar_patterns:
@@ -1560,9 +1558,9 @@ IMPORTANT:
         Returns:
             Dict with execution status and generated content:
             {
-                "success": bool,
-                "teaching_content": Optional[Dict],
-                "message": str
+                "success": bool,  # True if pattern was reinforced successfully
+                "teaching_content": Optional[Dict],  # LLM-generated content or None
+                "message": str  # Description of what happened
             }
         """
         if pattern_name not in self.learner.grammar_patterns:
@@ -1607,6 +1605,15 @@ IMPORTANT:
         - Storing pending teaching action when we teach
         - Evaluating it when we see the next learner input
         - Checking both immediate and next-turn effectiveness
+
+        ⚠️ EFFECTIVENESS MEASUREMENT LIMITATION:
+        The underlying `_check_pattern_usage_in_current_turn()` method only checks
+        for the absence of errors, not confirmation that the learner actually
+        attempted to use the pattern. This means:
+        - Success rates may be OVERESTIMATED
+        - Strategy effectiveness should be used as one signal among many
+        - Not suitable for high-stakes decisions without additional validation
+        - See: docs/grammar_curriculum_agent_plan.md Challenge #5
 
         Args:
             teaching_action: The teaching action we took (dict with pattern, strategy, etc.)
@@ -1974,13 +1981,14 @@ IMPORTANT:
         Ensures that for every pattern in the order, all its prerequisites
         appear before it.
 
-        IMPLEMENTATION: Dependency validation
+        IMPLEMENTATION: Dependency validation with circular dependency detection
 
         ALGORITHM:
         1. Track which patterns have been seen
         2. For each pattern, check if its prerequisites are in the seen set
         3. If not, move the pattern after its prerequisites
-        4. Return validated order
+        4. Detect and handle circular dependencies gracefully
+        5. Return validated order
 
         Args:
             order: Proposed curriculum order
@@ -1990,14 +1998,18 @@ IMPORTANT:
         """
         validated_order = []
         seen_patterns = set()
+        unresolved_patterns = set(order)
 
         # May need multiple passes to resolve all dependencies
         max_iterations = len(order) * 2  # Prevent infinite loops
         iteration = 0
+        stuck_count = 0  # Track how many iterations we've made no progress
+        last_validated_count = 0
 
         while len(validated_order) < len(order) and iteration < max_iterations:
             iteration += 1
             progress_made = False
+            stuck_patterns = []  # Track patterns that couldn't be resolved this pass
 
             for pattern_name in order:
                 if pattern_name in validated_order:
@@ -2010,26 +2022,56 @@ IMPORTANT:
                     # No dependencies, can add immediately
                     validated_order.append(pattern_name)
                     seen_patterns.add(pattern_name)
+                    unresolved_patterns.discard(pattern_name)
                     progress_made = True
                 else:
                     # Check if all prerequisites are satisfied
-                    prerequisites_met = all(
-                        prereq in seen_patterns for prereq in dependency.requires
-                    )
+                    missing_prereqs = [
+                        prereq for prereq in dependency.requires
+                        if prereq not in seen_patterns
+                    ]
 
-                    if prerequisites_met:
+                    if not missing_prereqs:
+                        # All prerequisites met
                         validated_order.append(pattern_name)
                         seen_patterns.add(pattern_name)
+                        unresolved_patterns.discard(pattern_name)
                         progress_made = True
+                    else:
+                        # Track this pattern as stuck for now
+                        stuck_patterns.append((pattern_name, missing_prereqs))
 
-            if not progress_made:
-                # No progress made - likely circular dependency or missing prerequisite
-                # Add remaining patterns in their original order
-                for pattern_name in order:
-                    if pattern_name not in validated_order:
-                        validated_order.append(pattern_name)
-                        seen_patterns.add(pattern_name)
-                break
+            # Check for circular dependency or missing prerequisite patterns
+            if len(validated_order) == last_validated_count:
+                stuck_count += 1
+                if stuck_count >= 2:
+                    # We've been stuck for 2 iterations - this indicates a problem
+                    print(f"[GrammarCurriculum] Dependency validation stuck at iteration {iteration}")
+                    print(f"[GrammarCurriculum] Unresolved patterns: {unresolved_patterns}")
+
+                    # Analyze stuck patterns for circular dependencies
+                    for pattern_name, missing_prereqs in stuck_patterns:
+                        # Check if missing prereqs are also stuck (potential circular dependency)
+                        circular_candidates = [p for p in missing_prereqs if p in unresolved_patterns]
+                        if circular_candidates:
+                            print(f"[GrammarCurriculum] Potential circular dependency: "
+                                  f"'{pattern_name}' depends on {circular_candidates} "
+                                  f"which are also unresolved")
+
+                    # Add remaining patterns in their original order with a warning
+                    print("[GrammarCurriculum] Adding remaining patterns without dependency resolution")
+                    for pattern_name in order:
+                        if pattern_name not in validated_order:
+                            validated_order.append(pattern_name)
+                            seen_patterns.add(pattern_name)
+                    break
+            else:
+                stuck_count = 0  # Reset stuck counter if we made progress
+
+            last_validated_count = len(validated_order)
+
+        if iteration >= max_iterations:
+            print(f"[GrammarCurriculum] Warning: Dependency validation reached max iterations ({max_iterations})")
 
         return validated_order
 
@@ -2046,6 +2088,8 @@ IMPORTANT:
 
         Args:
             context: Teaching context with learner state and conversation data
+
+        Note: Uses centralized prompts from llm.grammar_prompts for versioning.
         """
         # Increment counter
         self._learning_style_detection_turns += 1
@@ -2078,48 +2122,18 @@ IMPORTANT:
                         f"{strategy_name}: {stats.success_rate:.1%} success rate ({stats.attempts} attempts)"
                     )
 
-            prompt = f"""You are analyzing this learner's grammar learning patterns.
-
-Recent Grammar Interactions:
-- Errors in last few turns: {recent_errors}
-- Mastered patterns: {mastered_patterns}
-- Teaching strategy effectiveness: {strategy_effectiveness if strategy_effectiveness else "No data yet"}
-- Current profile: {self.learner_profile.learning_style} learner
-
-Determine:
-1. Learning style (analytical | visual | immersion | unknown)
-2. Most effective teaching methods
-3. Patterns they struggle with
-4. Patterns they excel at
-5. Optimal teaching frequency (how often to teach grammar)
-
-Return ONLY valid JSON in this format:
-{{
-    "learning_style": "analytical" | "visual" | "immersion" | "unknown",
-    "effective_methods": ["method1", "method2"],
-    "struggle_patterns": ["pattern1", "pattern2"],
-    "strength_patterns": ["pattern1", "pattern2"],
-    "optimal_frequency": "every_X_turns" (e.g., "every_8_turns", "every_12_turns", "every_15_turns")
-}}
-
-Learning styles:
-- analytical: Prefers rules, explanations, explicit grammar instruction
-- visual: Prefers examples, patterns, color-coded highlighting
-- immersion: Prefers learning through context, conversation, exposure
-- unknown: Not enough data to determine
-
-Optimal frequency guidelines:
-- every_8_turns: Learner who thrives with frequent, short lessons
-- every_10_turns: Balanced approach (default)
-- every_12_turns: Learner who prefers more conversation between lessons
-- every_15_turns: Learner who needs significant flow time between lessons
-"""
+            # Build prompt using centralized template
+            system_prompt, user_prompt = build_learner_profiling_prompt(
+                recent_errors=recent_errors,
+                mastered_patterns=mastered_patterns,
+                strategy_effectiveness=strategy_effectiveness,
+                current_profile=self.learner_profile.learning_style
+            )
 
             response = self.llm_client.generate_response(
-                system_prompt="You are a language learning pedagogy expert. Always respond with valid JSON only.",
-                user_message=prompt,
-                temperature=0.3,
-                max_tokens=200,
+                system_prompt=system_prompt,
+                user_message=user_prompt,
+                **LEARNER_PROFILING_PARAMS
             )
 
             # Parse JSON response
@@ -2155,8 +2169,13 @@ Optimal frequency guidelines:
 
             print("[GrammarCurriculum] Learning style detection completed successfully")
 
+        except json.JSONDecodeError as e:
+            print(f"[GrammarCurriculum] Learning style detection failed (JSON parsing): {e}")
+            # Don't update profile on failure - keep existing data
         except Exception as e:
+            import traceback
             print(f"[GrammarCurriculum] Learning style detection failed: {e}")
+            print(f"[GrammarCurriculum] Traceback: {traceback.format_exc()}")
             # Don't update profile on failure - keep existing data
 
     def get_capabilities(self) -> List[str]:

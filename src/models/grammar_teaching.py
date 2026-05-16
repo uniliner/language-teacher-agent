@@ -79,10 +79,20 @@ class LearnerGrammarProfile(BaseModel):
 
         IMPLEMENTATION: Track patterns and strategies
 
+        ⚠️ EFFECTIVENESS MEASUREMENT LIMITATION:
+        The `success` parameter is derived from `_check_pattern_usage_in_current_turn()`
+        which only checks for absence of errors, not confirmation that the learner
+        actually attempted to use the pattern. Treat tracked patterns and strategies
+        as indicative, not definitive:
+        - Use for rough guidance and trend analysis
+        - Don't use for high-stakes decisions ("never use this strategy again")
+        - Combine with explicit feedback loops when possible
+        - See: docs/grammar_curriculum_agent_plan.md Challenge #5
+
         Args:
             pattern: Pattern name that was taught
             strategy: Teaching strategy used
-            success: Whether the teaching was effective
+            success: Whether the teaching was effective (may be overestimated)
             pattern_mastery_data: Optional dict with pattern stats {
                 "attempts": int,
                 "mastery_score": float
