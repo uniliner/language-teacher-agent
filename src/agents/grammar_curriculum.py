@@ -841,7 +841,10 @@ If action is "wait", set pattern to "null" and teaching_approach to "none"."""
             # Get turns_since_last_grammar from either direct context or conversation sub-context
             turns_since_grammar = context.get("turns_since_last_grammar",
                                               context.get("conversation", {}).get("turns_since_last_grammar", 0))
-            if turns_since_grammar < 10:
+
+            # Use learner's optimal teaching frequency (detected via LLM)
+            required_turns = self._get_optimal_teaching_frequency()
+            if turns_since_grammar < required_turns:
                 return False
 
         # Check if learner is receptive
@@ -853,6 +856,40 @@ If action is "wait", set pattern to "null" and teaching_approach to "none"."""
             return False
 
         return True
+
+    def _get_optimal_teaching_frequency(self) -> int:
+        """
+        Get the optimal teaching frequency for this learner.
+
+        Parses the `optimal_teaching_frequency` from the learner profile
+        and returns the number of turns to wait between grammar lessons.
+
+        Returns:
+            Number of turns (default: 10)
+
+        Examples:
+            - "every_8_turns" -> 8
+            - "every_10_turns" -> 10
+            - "every_15_turns" -> 15
+            - "adaptive" -> 10 (default)
+        """
+        frequency_str = self.learner_profile.optimal_teaching_frequency
+
+        # Parse the frequency string to extract the number
+        # Format: "every_X_turns" where X is a number
+        if frequency_str and frequency_str != "adaptive":
+            try:
+                # Extract the number from strings like "every_10_turns"
+                # Split by underscore and find the numeric part
+                parts = frequency_str.split('_')
+                for part in parts:
+                    if part.isdigit():
+                        return int(part)
+            except (ValueError, AttributeError):
+                pass
+
+        # Default to 10 turns if we can't parse or it's "adaptive"
+        return 10
 
     def _is_learner_receptive(self, context: Dict) -> bool:
         """
@@ -1247,7 +1284,16 @@ Return only the pattern names, separated by commas, most relevant first."""
             context: Teaching context
 
         Returns:
-            Result dictionary with execution outcomes
+            Result dictionary with execution outcomes and generated teaching content:
+            {
+                "action": str,
+                "pattern": str,
+                "reasoning": str,
+                "teaching_approach": str,
+                "executed": bool,
+                "teaching_content": Optional[Dict],  # Added for Prompt #2
+                "message": str
+            }
         """
         action = teaching_plan["action"]
         pattern = teaching_plan.get("pattern")
@@ -1258,6 +1304,8 @@ Return only the pattern names, separated by commas, most relevant first."""
             "reasoning": teaching_plan.get("reasoning", ""),
             "teaching_approach": teaching_plan.get("teaching_approach", "none"),
             "executed": False,
+            "teaching_content": None,  # Will be populated by teaching methods
+            "message": "",
         }
 
         if action == "wait":
@@ -1270,41 +1318,168 @@ Return only the pattern names, separated by commas, most relevant first."""
             result["message"] = f"Action {action} requires a pattern"
             return result
 
-        # Execute the teaching action
+        # Execute the teaching action (methods now return Dict with success/content)
         if action == "introduce_pattern":
-            success = self._introduce_pattern(pattern, teaching_plan, context)
+            action_result = self._introduce_pattern(pattern, teaching_plan, context)
         elif action == "review_pattern":
-            success = self._review_pattern(pattern, teaching_plan, context)
+            action_result = self._review_pattern(pattern, teaching_plan, context)
         elif action == "reinforce_pattern":
-            success = self._reinforce_pattern(pattern, teaching_plan, context)
+            action_result = self._reinforce_pattern(pattern, teaching_plan, context)
         else:
-            success = False
-            result["message"] = f"Unknown action: {action}"
+            action_result = {
+                "success": False,
+                "teaching_content": None,
+                "message": f"Unknown action: {action}"
+            }
 
-        result["executed"] = success
-        if success:
+        # Update result with action results
+        result["executed"] = action_result.get("success", False)
+        result["teaching_content"] = action_result.get("teaching_content")
+        result["message"] = action_result.get("message", result["message"])
+
+        if result["executed"]:
             # Update last grammar teaching turn
             self._last_grammar_teaching_turn = context["conversation"].get("turns_since_last_grammar", 0)
 
         return result
 
-    def _introduce_pattern(self, pattern_name: str, teaching_plan: Dict, context: Dict) -> bool:
+    def _generate_teaching_content(
+        self,
+        pattern_name: str,
+        teaching_approach: str,
+        context: Dict
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Generate teaching content (explanation, examples, practice) for a grammar pattern.
+
+        This is Prompt #2 from the implementation plan. It generates the actual
+        teaching material that will be presented to the learner.
+
+        Args:
+            pattern_name: Name of the grammar pattern to teach
+            teaching_approach: The pedagogical approach (e.g., "explicit_explanation")
+            context: Teaching context with learner state and conversation data
+
+        Returns:
+            Dict with generated content:
+            {
+                "strategy": str,
+                "explanation": str,
+                "examples": List[str],
+                "practice_suggestion": str
+            }
+            Returns None if LLM is not available or generation fails.
+        """
+        if not self.llm_client:
+            print("[GrammarCurriculum] No LLM client available for teaching content generation")
+            return None
+
+        # Get pattern details
+        curriculum_pattern = self._pattern_map.get(pattern_name)
+        if not curriculum_pattern:
+            print(f"[GrammarCurriculum] Unknown pattern for content generation: {pattern_name}")
+            return None
+
+        try:
+            # Get learner's profile for personalization
+            learning_style = self.learner_profile.learning_style
+            effective_methods = self.learner_profile.effective_teaching_methods or ["explicit_explanation"]
+
+            # Check if learner has struggled with this pattern before
+            past_struggles = pattern_name in self.learner_profile.error_prone_patterns
+
+            prompt = f"""You are generating a teaching approach for the German grammar pattern: {pattern_name}
+
+Pattern Details:
+- Category: {curriculum_pattern.category.value}
+- Difficulty: {curriculum_pattern.difficulty_level.value}
+- Description: {curriculum_pattern.description}
+
+Learner Profile:
+- Learning style: {learning_style}
+- Effective teaching methods: {', '.join(effective_methods)}
+- Past struggles with this pattern: {"Yes" if past_struggles else "No"}
+
+Teaching approach to use: {teaching_approach}
+
+Available teaching approaches:
+- explicit_explanation: Clear rules with examples (great for analytical learners)
+- pattern_highlighting: Show patterns visually (great for visual learners)
+- guided_discovery: Help learner figure it out themselves (great for immersion learners)
+
+Generate a teaching approach and return ONLY valid JSON in this format:
+{{
+    "strategy": "{teaching_approach}",
+    "explanation": "2-3 sentence explanation appropriate for {learning_style} learners",
+    "examples": ["German example with translation", "Another example", "Third example if needed"],
+    "practice_suggestion": "Simple exercise or question for learner to practice"
+}}
+
+IMPORTANT:
+- Examples must be in German with English translations
+- Explanation must match the learner's learning style ({learning_style})
+- Keep explanation concise (2-3 sentences max)
+- Practice suggestion should be actionable and specific
+"""
+
+            response = self.llm_client.generate_response(
+                system_prompt="You are a German language pedagogy expert specializing in grammar instruction. Always respond with valid JSON only, no additional text.",
+                user_message=prompt,
+                temperature=0.4,  # Slightly higher for creative examples
+                max_tokens=300,
+            )
+
+            # Parse JSON response
+            teaching_content = json.loads(response)
+
+            # Validate required fields
+            required_fields = ["strategy", "explanation", "examples", "practice_suggestion"]
+            for field in required_fields:
+                if field not in teaching_content:
+                    print(f"[GrammarCurriculum] Missing field in teaching content: {field}")
+                    return None
+
+            print(f"[GrammarCurriculum] Generated teaching content for {pattern_name} using {teaching_approach}")
+            return teaching_content
+
+        except json.JSONDecodeError as e:
+            print(f"[GrammarCurriculum] Failed to parse teaching content JSON: {e}")
+            return None
+        except Exception as e:
+            print(f"[GrammarCurriculum] Teaching content generation failed: {e}")
+            return None
+
+    def _introduce_pattern(self, pattern_name: str, teaching_plan: Dict, context: Dict) -> Dict[str, Any]:
         """
         Introduce a new grammar pattern.
 
+        Generates teaching content using LLM and creates the pattern record.
+
         Args:
             pattern_name: Name of pattern to introduce
-            teaching_plan: Teaching plan with approach and examples
+            teaching_plan: Teaching plan with approach and timing
             context: Teaching context
 
         Returns:
-            True if successful
+            Dict with execution status and generated content:
+            {
+                "success": bool,
+                "teaching_content": Optional[Dict],
+                "message": str
+            }
         """
         # Check if pattern exists in curriculum
         curriculum_pattern = self._pattern_map.get(pattern_name)
         if not curriculum_pattern:
-            print(f"[GrammarCurriculum] Unknown pattern: {pattern_name}")
-            return False
+            return {
+                "success": False,
+                "teaching_content": None,
+                "message": f"Unknown pattern: {pattern_name}"
+            }
+
+        # Generate teaching content
+        teaching_approach = teaching_plan.get("teaching_approach", "explicit_explanation")
+        teaching_content = self._generate_teaching_content(pattern_name, teaching_approach, context)
 
         # Create pattern on learner if it doesn't exist
         if pattern_name not in self.learner.grammar_patterns:
@@ -1317,50 +1492,102 @@ Return only the pattern names, separated by commas, most relevant first."""
                 introduced_at_level=curriculum_pattern.introduced_at_level,
             )
             print(f"[GrammarCurriculum] Introduced pattern: {pattern_name}")
-            return True
 
-        return False
+            return {
+                "success": True,
+                "teaching_content": teaching_content,
+                "message": f"Introduced {pattern_name}"
+            }
 
-    def _review_pattern(self, pattern_name: str, teaching_plan: Dict, context: Dict) -> bool:
+        # Pattern already exists
+        return {
+            "success": True,
+            "teaching_content": teaching_content,
+            "message": f"Pattern {pattern_name} already exists, refreshed teaching content"
+        }
+
+    def _review_pattern(self, pattern_name: str, teaching_plan: Dict, context: Dict) -> Dict[str, Any]:
         """
         Review an existing grammar pattern.
 
+        Generates focused review content for patterns that need spaced repetition.
+
         Args:
             pattern_name: Name of pattern to review
-            teaching_plan: Teaching plan with approach and examples
+            teaching_plan: Teaching plan with approach and timing
             context: Teaching context
 
         Returns:
-            True if successful
+            Dict with execution status and generated content:
+            {
+                "success": bool,
+                "teaching_content": Optional[Dict],
+                "message": str
+            }
         """
         if pattern_name not in self.learner.grammar_patterns:
-            print(f"[GrammarCurriculum] Cannot review unknown pattern: {pattern_name}")
-            return False
+            return {
+                "success": False,
+                "teaching_content": None,
+                "message": f"Cannot review unknown pattern: {pattern_name}"
+            }
+
+        # Generate teaching content for review
+        teaching_approach = teaching_plan.get("teaching_approach", "explicit_explanation")
+        teaching_content = self._generate_teaching_content(pattern_name, teaching_approach, context)
 
         # Record a review attempt (not counted as success/failure yet)
         # The actual learning will be measured in next turns
         print(f"[GrammarCurriculum] Reviewed pattern: {pattern_name}")
-        return True
 
-    def _reinforce_pattern(self, pattern_name: str, teaching_plan: Dict, context: Dict) -> bool:
+        return {
+            "success": True,
+            "teaching_content": teaching_content,
+            "message": f"Reviewed {pattern_name}"
+        }
+
+    def _reinforce_pattern(self, pattern_name: str, teaching_plan: Dict, context: Dict) -> Dict[str, Any]:
         """
         Reinforce a weak grammar pattern.
 
+        Generates targeted reinforcement content for patterns the learner struggles with.
+
         Args:
             pattern_name: Name of pattern to reinforce
-            teaching_plan: Teaching plan with approach and examples
+            teaching_plan: Teaching plan with approach and timing
             context: Teaching context
 
         Returns:
-            True if successful
+            Dict with execution status and generated content:
+            {
+                "success": bool,
+                "teaching_content": Optional[Dict],
+                "message": str
+            }
         """
         if pattern_name not in self.learner.grammar_patterns:
-            print(f"[GrammarCurriculum] Cannot reinforce unknown pattern: {pattern_name}")
-            return False
+            return {
+                "success": False,
+                "teaching_content": None,
+                "message": f"Cannot reinforce unknown pattern: {pattern_name}"
+            }
+
+        # Generate teaching content for reinforcement
+        # For reinforcement, prefer explicit_explanation approach by default
+        teaching_approach = teaching_plan.get("teaching_approach", "explicit_explanation")
+        if teaching_approach == "none":
+            teaching_approach = "explicit_explanation"  # Override for reinforcement
+
+        teaching_content = self._generate_teaching_content(pattern_name, teaching_approach, context)
 
         # Record a reinforcement attempt
         print(f"[GrammarCurriculum] Reinforced pattern: {pattern_name}")
-        return True
+
+        return {
+            "success": True,
+            "teaching_content": teaching_content,
+            "message": f"Reinforced {pattern_name}"
+        }
 
     def _track_teaching_effectiveness(
         self,
@@ -1864,13 +2091,15 @@ Determine:
 2. Most effective teaching methods
 3. Patterns they struggle with
 4. Patterns they excel at
+5. Optimal teaching frequency (how often to teach grammar)
 
 Return ONLY valid JSON in this format:
 {{
     "learning_style": "analytical" | "visual" | "immersion" | "unknown",
     "effective_methods": ["method1", "method2"],
     "struggle_patterns": ["pattern1", "pattern2"],
-    "strength_patterns": ["pattern1", "pattern2"]
+    "strength_patterns": ["pattern1", "pattern2"],
+    "optimal_frequency": "every_X_turns" (e.g., "every_8_turns", "every_12_turns", "every_15_turns")
 }}
 
 Learning styles:
@@ -1878,6 +2107,12 @@ Learning styles:
 - visual: Prefers examples, patterns, color-coded highlighting
 - immersion: Prefers learning through context, conversation, exposure
 - unknown: Not enough data to determine
+
+Optimal frequency guidelines:
+- every_8_turns: Learner who thrives with frequent, short lessons
+- every_10_turns: Balanced approach (default)
+- every_12_turns: Learner who prefers more conversation between lessons
+- every_15_turns: Learner who needs significant flow time between lessons
 """
 
             response = self.llm_client.generate_response(
@@ -1912,6 +2147,11 @@ Learning styles:
                 for pattern in detection_result["strength_patterns"]:
                     if pattern not in self.learner_profile.strength_patterns:
                         self.learner_profile.strength_patterns.append(pattern)
+
+            # Update optimal teaching frequency if provided
+            if "optimal_frequency" in detection_result:
+                self.learner_profile.optimal_teaching_frequency = detection_result["optimal_frequency"]
+                print(f"[GrammarCurriculum] Detected optimal teaching frequency: {detection_result['optimal_frequency']}")
 
             print("[GrammarCurriculum] Learning style detection completed successfully")
 

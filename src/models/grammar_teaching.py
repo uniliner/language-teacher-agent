@@ -52,6 +52,7 @@ class LearnerGrammarProfile(BaseModel):
     avg_attempts_to_mastery: float = 0.0
     retention_rate: float = 0.0  # how well they remember
     practice_frequency_preference: str = "adaptive"
+    optimal_teaching_frequency: str = "adaptive"  # e.g., "every_10_turns", "every_15_turns"
 
     def update_learning_style(self, detected_style: str) -> None:
         """
